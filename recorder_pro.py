@@ -12,7 +12,7 @@ from pystray import MenuItem as item
 import pyaudiowpatch as pyaudio
 from screeninfo import get_monitors
 
-# --- 1. 开启 Windows 高清屏适配 ---
+# --- Windows DPI 适配 ---
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
@@ -23,36 +23,30 @@ def resource_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# --- 2. 自动生成图标算法 ---
+# --- 图标生成 ---
 def create_eye_icon(size=64, style="normal"):
     image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    sclera_color = (240, 240, 240)
+    # 画一个简单的眼睛
+    draw.ellipse((2, 2, size-2, size-2), fill=(240, 240, 240), outline=(200, 200, 200))
     iris_color = (0, 120, 212) if style == "normal" else (209, 52, 56)
-    pupil_color = (20, 20, 20)
-    draw.ellipse((2, 2, size-2, size-2), fill=sclera_color, outline=(200, 200, 200))
-    iris_size = size * 0.55
-    iris_offset = (size - iris_size) / 2
-    draw.ellipse((iris_offset, iris_offset, iris_offset+iris_size, iris_offset+iris_size), fill=iris_color)
-    pupil_size = size * 0.25
-    pupil_offset = (size - pupil_size) / 2
-    draw.ellipse((pupil_offset, pupil_offset, pupil_offset+pupil_size, pupil_offset+pupil_size), fill=pupil_color)
-    highlight_size = size * 0.1
-    draw.ellipse((size*0.6, size*0.3, size*0.6+highlight_size, size*0.3+highlight_size), fill=(255, 255, 255, 230))
+    c = size / 2
+    r_iris = size * 0.28
+    draw.ellipse((c-r_iris, c-r_iris, c+r_iris, c+r_iris), fill=iris_color)
+    r_pupil = size * 0.12
+    draw.ellipse((c-r_pupil, c-r_pupil, c+r_pupil, c+r_pupil), fill=(20, 20, 20))
     return image
 
 class ProfessionalRecorder:
     def __init__(self, root):
         self.root = root
         self.root.title("全能录屏 Pro")
-        self.root.geometry("500x420")
+        self.root.geometry("500x400")
         self.root.configure(bg="#1e1e1e")
-        
-        # --- 核心修改：无边框模式 (去白边) ---
-        self.root.overrideredirect(True) 
-        # ----------------------------------
+        self.root.overrideredirect(True) # 无边框
         
         self.is_recording = False
+        self.is_mini_mode = False
         self.process = None
         self.audio_thread = None
         self.region = None 
@@ -60,130 +54,273 @@ class ProfessionalRecorder:
         self.tray_icon = None
         self.record_cursor_var = tk.BooleanVar(value=True)
         
-        # 窗口拖动变量
-        self.offset_x = 0
-        self.offset_y = 0
+        # 窗口拖动和缩放变量
+        self.last_geometry = "500x400+300+300"
+        self._drag_data = {"x": 0, "y": 0, "mode": None}
+        
+        # 边缘检测距离
+        self.resize_margin = 8 
 
-        # 生成图标
+        # 图标资源
         self.icon_img = create_eye_icon(64, "normal")
         self.rec_icon_img = create_eye_icon(64, "record")
         self.tk_icon = ImageTk.PhotoImage(self.icon_img)
         self.root.iconphoto(True, self.tk_icon)
 
-        # 启动顺序：先UI(含自定义标题栏) -> 再托盘
         self.setup_ui() 
         self.setup_tray()
         
-        # 检查FFmpeg
+        # 绑定全局鼠标事件用于边缘检测
+        self.root.bind("<Motion>", self.check_cursor_style)
+        self.root.bind("<ButtonPress-1>", self.start_drag_or_resize)
+        self.root.bind("<ButtonRelease-1>", self.stop_drag_or_resize)
+        self.root.bind("<B1-Motion>", self.do_drag_or_resize)
+        
         if not os.path.exists(self.ffmpeg_path):
             messagebox.showerror("致命错误", f"找不到内核文件: {self.ffmpeg_path}")
 
-    # --- 自定义标题栏拖动逻辑 ---
+    # ==========================
+    # 核心逻辑：8方向窗口拉伸
+    # ==========================
+    def check_cursor_style(self, event):
+        if self.is_mini_mode: return # Mini模式不处理
+        
+        x, y = event.x, event.y
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        m = self.resize_margin
+        
+        cursor = ""
+        mode = ""
+
+        # 判定区域
+        on_left = x < m
+        on_right = x > w - m
+        on_top = y < m
+        on_bottom = y > h - m
+
+        if on_top and on_left: cursor, mode = "sb_h_double_arrow", "nw" # 实际上是斜向，tk用通用图标
+        elif on_top and on_right: cursor, mode = "sb_h_double_arrow", "ne"
+        elif on_bottom and on_left: cursor, mode = "sb_h_double_arrow", "sw"
+        elif on_bottom and on_right: cursor, mode = "sb_h_double_arrow", "se"
+        elif on_top: cursor, mode = "sb_v_double_arrow", "n"
+        elif on_bottom: cursor, mode = "sb_v_double_arrow", "s"
+        elif on_left: cursor, mode = "sb_h_double_arrow", "w"
+        elif on_right: cursor, mode = "sb_h_double_arrow", "e"
+        else: cursor, mode = "arrow", None
+
+        # 只有当在普通界面且非拖动标题栏时才改变鼠标
+        if self.root.cget("cursor") != cursor:
+            self.root.config(cursor=cursor)
+            
+        self._drag_data["hover_mode"] = mode
+
+    def start_drag_or_resize(self, event):
+        if self.is_mini_mode: return
+        
+        mode = self._drag_data.get("hover_mode")
+        if mode:
+            # 开始调整大小
+            self._drag_data["mode"] = mode
+            self._drag_data["start_x"] = event.x_root
+            self._drag_data["start_y"] = event.y_root
+            self._drag_data["start_w"] = self.root.winfo_width()
+            self._drag_data["start_h"] = self.root.winfo_height()
+            self._drag_data["start_geo_x"] = self.root.winfo_x()
+            self._drag_data["start_geo_y"] = self.root.winfo_y()
+        else:
+            # 检查是否点击了标题栏区域 (假设高度35)
+            # 这里做个简单的区域判断，如果是通过Frame绑定的拖动会由Frame处理
+            # 这里处理的是点击了背景的情况
+            pass
+
+    def stop_drag_or_resize(self, event):
+        self._drag_data["mode"] = None
+        self.root.config(cursor="arrow")
+
+    def do_drag_or_resize(self, event):
+        mode = self._drag_data.get("mode")
+        if not mode: return
+
+        dx = event.x_root - self._drag_data["start_x"]
+        dy = event.y_root - self._drag_data["start_y"]
+        
+        x, y = self._drag_data["start_geo_x"], self._drag_data["start_geo_y"]
+        w, h = self._drag_data["start_w"], self._drag_data["start_h"]
+        
+        new_x, new_y, new_w, new_h = x, y, w, h
+        
+        # 计算新坐标和尺寸
+        if "n" in mode: 
+            new_y += dy; new_h -= dy
+        if "s" in mode: 
+            new_h += dy
+        if "w" in mode: 
+            new_x += dx; new_w -= dx
+        if "e" in mode: 
+            new_w += dx
+
+        # 最小尺寸限制
+        if new_w < 350: new_w = 350
+        if new_h < 300: new_h = 300
+        
+        # 应用
+        self.root.geometry(f"{new_w}x{new_h}+{new_x}+{new_y}")
+
+    # ==========================
+    # 标题栏拖动 (独立逻辑)
+    # ==========================
     def start_move(self, event):
-        self.offset_x = event.x
-        self.offset_y = event.y
+        self._drag_data["win_x"] = event.x
+        self._drag_data["win_y"] = event.y
 
     def do_move(self, event):
-        x = self.root.winfo_x() + event.x - self.offset_x
-        y = self.root.winfo_y() + event.y - self.offset_y
+        x = self.root.winfo_x() + event.x - self._drag_data["win_x"]
+        y = self.root.winfo_y() + event.y - self._drag_data["win_y"]
         self.root.geometry(f"+{x}+{y}")
-    # --------------------------
 
-    def setup_tray(self):
-        def show_window(icon, item):
-            self.root.deiconify()
-            self.root.lift()
-        def quit_app(icon, item):
-            self.root.after(0, self.kill_app) # 强制退出
-        menu = (item('显示主界面', show_window, default=True), item('退出', quit_app))
-        self.tray_icon = pystray.Icon("name", self.icon_img, "录屏助手 - 待机", menu)
-        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+    # ==========================
+    # Mini 模式切换
+    # ==========================
+    def toggle_mini_mode(self):
+        if not self.is_mini_mode:
+            self.is_mini_mode = True
+            self.last_geometry = self.root.geometry()
+            
+            # 屏幕左下角
+            screen_h = self.root.winfo_screenheight()
+            target_y = screen_h - 90 # 状态栏上方
+            target_x = 20
+            
+            self.normal_frame.pack_forget()
+            self.mini_frame.pack(fill=tk.BOTH, expand=True)
+            self.root.geometry(f"420x50+{target_x}+{target_y}")
+            self.root.attributes('-topmost', True)
+        else:
+            self.is_mini_mode = False
+            self.mini_frame.pack_forget()
+            self.normal_frame.pack(fill=tk.BOTH, expand=True)
+            # 恢复位置
+            try:
+                # 简单的解析，防止 geometry 出错
+                parts = self.last_geometry.replace('x', '+').split('+')
+                self.root.geometry(f"{parts[0]}x{parts[1]}+{parts[2]}+{parts[3]}")
+            except:
+                self.root.geometry("500x400+300+300")
+            self.root.attributes('-topmost', False)
 
-    def minimize_to_tray(self):
-        # 最小化时隐藏窗口
-        self.root.withdraw()
-        # 此时只能通过托盘恢复，或者添加气泡提示（可选）
-
-    def kill_app(self):
-        # 彻底退出的逻辑
-        if self.is_recording:
-             if not messagebox.askyesno("确认", "正在录制中，强制退出将停止录制。", parent=self.root):
-                 return
-             self.stop_recording()
-        
-        if self.tray_icon:
-            self.tray_icon.stop()
-        self.root.destroy()
-        os._exit(0) # 确保所有线程被杀掉
-
+    # ==========================
+    # UI 构建
+    # ==========================
     def setup_ui(self):
-        bg_color = "#1e1e1e"
-        title_bg = "#2d2d2d"
-        btn_color = "#0078d4"
-        text_color = "#ffffff"
+        self.bg_color = "#1e1e1e"
+        self.title_bg = "#2d2d2d"
         
-        # --- 自定义标题栏 (替代系统白边) ---
-        title_bar = tk.Frame(self.root, bg=title_bg, relief="flat", height=35)
+        # 1. 正常界面
+        self.normal_frame = tk.Frame(self.root, bg=self.bg_color)
+        self.normal_frame.pack(fill=tk.BOTH, expand=True)
+        self.build_normal_ui(self.normal_frame)
+        
+        # 2. Mini 界面
+        self.mini_frame = tk.Frame(self.root, bg="#333333", highlightthickness=1, highlightbackground="#555555")
+        self.build_mini_ui(self.mini_frame)
+
+    def build_mini_ui(self, parent):
+        # 绑定拖动
+        parent.bind("<Button-1>", self.start_move)
+        parent.bind("<B1-Motion>", self.do_move)
+        
+        # 布局：左侧还原 -> 框选 -> 鼠标 -> (空白拖动区) -> 停止 -> 开始
+        # 使用 pack(side=LEFT/RIGHT) 保证排列整齐
+        
+        btn_opts = {"bd": 0, "width": 4, "font": ("Arial", 10)}
+        
+        # 左侧功能区
+        tk.Button(parent, text="⤢", bg="#444444", fg="white", command=self.toggle_mini_mode, **btn_opts).pack(side=tk.LEFT, padx=1, fill=tk.Y)
+        tk.Button(parent, text="⛶", bg="#333333", fg="white", command=self.select_area, **btn_opts).pack(side=tk.LEFT, padx=1, fill=tk.Y)
+        
+        # 鼠标开关 (Mini版用颜色区分状态)
+        self.btn_mini_cursor = tk.Button(parent, text="🖱️", bg="#333333", fg="#00ff00", command=self.toggle_cursor_mini, **btn_opts)
+        self.btn_mini_cursor.pack(side=tk.LEFT, padx=1, fill=tk.Y)
+        
+        # 中间空白区 (用于拖动)
+        spacer = tk.Label(parent, text="Mini Mode", bg="#333333", fg="#666666", font=("Segoe UI", 8))
+        spacer.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        spacer.bind("<Button-1>", self.start_move)
+        spacer.bind("<B1-Motion>", self.do_move)
+
+        # 右侧控制区
+        self.btn_mini_stop = tk.Button(parent, text="⬛", command=self.stop_recording, bg="#d13438", fg="white", state=tk.DISABLED, **btn_opts)
+        self.btn_mini_stop.pack(side=tk.RIGHT, padx=1, fill=tk.Y)
+        
+        self.btn_mini_start = tk.Button(parent, text="▶", command=self.start_recording, bg="#0078d4", fg="white", **btn_opts)
+        self.btn_mini_start.pack(side=tk.RIGHT, padx=1, fill=tk.Y)
+
+    def toggle_cursor_mini(self):
+        # Mini模式下的鼠标开关逻辑
+        current = self.record_cursor_var.get()
+        self.record_cursor_var.set(not current)
+        color = "#00ff00" if not current else "#555555" # 绿色开启，灰色关闭
+        self.btn_mini_cursor.config(fg=color)
+        # 同步更新主界面的 Checkbutton (如果需要)
+
+    def build_normal_ui(self, parent):
+        # 标题栏 (固定高度)
+        title_bar = tk.Frame(parent, bg=self.title_bg, height=35)
         title_bar.pack(side=tk.TOP, fill=tk.X)
-        title_bar.pack_propagate(False) # 固定高度
-        
-        # 绑定拖动事件到标题栏背景和标题文字
+        title_bar.pack_propagate(False)
         title_bar.bind("<Button-1>", self.start_move)
         title_bar.bind("<B1-Motion>", self.do_move)
 
-        # 标题栏图标
-        lbl_icon = tk.Label(title_bar, image=self.tk_icon, bg=title_bg, bd=0)
+        lbl_icon = tk.Label(title_bar, image=self.tk_icon, bg=self.title_bg, bd=0)
         lbl_icon.pack(side=tk.LEFT, padx=(10, 5))
-        lbl_icon.bind("<Button-1>", self.start_move)
-        
-        # 标题栏文字
-        lbl_title = tk.Label(title_bar, text="全能录屏 Pro", bg=title_bg, fg="#dddddd", font=("Segoe UI", 10))
-        lbl_title.pack(side=tk.LEFT)
-        lbl_title.bind("<Button-1>", self.start_move)
-        
-        # 自定义关闭按钮 (X)
-        btn_close = tk.Button(title_bar, text="✕", bg=title_bg, fg="#aaaaaa", activebackground="#e81123", activeforeground="white", bd=0, font=("Arial", 11), width=4, command=self.kill_app)
-        btn_close.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # 自定义最小化按钮 (-)
-        btn_min = tk.Button(title_bar, text="─", bg=title_bg, fg="#aaaaaa", activebackground="#444444", activeforeground="white", bd=0, font=("Arial", 11), width=4, command=self.minimize_to_tray)
-        btn_min.pack(side=tk.RIGHT, fill=tk.Y)
-        # --------------------------------
+        tk.Label(title_bar, text="全能录屏 Pro", bg=self.title_bg, fg="#dddddd", font=("Segoe UI", 10)).pack(side=tk.LEFT)
 
-        # 内容区域
-        content_frame = tk.Frame(self.root, bg=bg_color)
+        btn_opts = {"bd": 0, "font": ("Arial", 11), "width": 4}
+        tk.Button(title_bar, text="✕", bg=self.title_bg, fg="#aaaaaa", activebackground="#e81123", activeforeground="white", command=self.kill_app, **btn_opts).pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Button(title_bar, text="⤢", bg=self.title_bg, fg="#aaaaaa", activebackground="#444444", activeforeground="white", command=self.toggle_mini_mode, **btn_opts).pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Button(title_bar, text="─", bg=self.title_bg, fg="#aaaaaa", activebackground="#444444", activeforeground="white", command=self.minimize_to_tray, **btn_opts).pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 内容区 (弹性)
+        content_frame = tk.Frame(parent, bg=self.bg_color)
         content_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.lbl_info = tk.Label(content_frame, text="状态: 就绪 (默认录制全屏)", font=("Segoe UI", 10), bg=bg_color, fg="#aaaaaa")
-        self.lbl_info.pack(pady=(20, 10))
         
-        ctrl_frame = tk.Frame(content_frame, bg=bg_color)
-        ctrl_frame.pack(pady=10)
+        # 信息区 (居中)
+        info_frame = tk.Frame(content_frame, bg=self.bg_color)
+        info_frame.pack(expand=True)
+        self.lbl_info = tk.Label(info_frame, text="Ready to Record", font=("Segoe UI", 16), bg=self.bg_color, fg="#666666")
+        self.lbl_info.pack()
 
-        tk.Button(ctrl_frame, text="⛶ 框选区域", command=self.select_area, bg="#333333", fg="white", font=("Segoe UI", 11), bd=0, padx=15, pady=8).grid(row=0, column=0, padx=10)
+        # 底部控制栏 (固定高度，防止按钮变形)
+        # 使用 pack(side=BOTTOM) 让它始终吸附底部
+        bottom_bar = tk.Frame(content_frame, bg=self.bg_color, height=100)
+        bottom_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=20)
         
-        self.btn_start = tk.Button(ctrl_frame, text="▶ 开始录制", command=self.start_recording, bg=btn_color, fg="white", font=("Segoe UI", 11, "bold"), bd=0, padx=20, pady=8)
-        self.btn_start.grid(row=0, column=1, padx=10)
+        # 按钮容器 (居中)
+        btn_container = tk.Frame(bottom_bar, bg=self.bg_color)
+        btn_container.pack(anchor=tk.CENTER)
 
-        # 鼠标录制开关
-        chk_cursor = tk.Checkbutton(content_frame, text="录制鼠标光标", variable=self.record_cursor_var, 
-                                    bg=bg_color, fg="#dddddd", selectcolor="#333333", activebackground=bg_color, activeforeground="#ffffff",
-                                    font=("Segoe UI", 10))
-        chk_cursor.pack(pady=5)
+        tk.Button(btn_container, text="⛶ 框选", command=self.select_area, bg="#333333", fg="white", font=("Segoe UI", 10), bd=0, padx=15, pady=8).pack(side=tk.LEFT, padx=10)
         
-        self.btn_stop = tk.Button(content_frame, text="⬛ 停止并保存", command=self.stop_recording, bg="#d13438", fg="white", font=("Segoe UI", 11), bd=0, padx=30, pady=5, state=tk.DISABLED)
-        self.btn_stop.pack(pady=15)
+        self.btn_start = tk.Button(btn_container, text="▶ 开始", command=self.start_recording, bg="#0078d4", fg="white", font=("Segoe UI", 10, "bold"), bd=0, padx=20, pady=8)
+        self.btn_start.pack(side=tk.LEFT, padx=10)
         
-        tk.Label(content_frame, text="System Loopback Audio · FFmpeg x264 · Frameless UI", bg=bg_color, fg="#555555", font=("Segoe UI", 8)).pack(side=tk.BOTTOM, pady=10)
+        self.btn_stop = tk.Button(btn_container, text="⬛ 停止", command=self.stop_recording, bg="#d13438", fg="white", font=("Segoe UI", 10), bd=0, padx=20, pady=8, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.LEFT, padx=10)
 
-        # 绘制边框 (因为去掉了系统边框，加一圈细线比较好看)
-        tk.Frame(self.root, bg="#333333", width=1).pack(side=tk.LEFT, fill=tk.Y)
-        tk.Frame(self.root, bg="#333333", width=1).pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Frame(self.root, bg="#333333", height=1).pack(side=tk.BOTTOM, fill=tk.X)
+        # 鼠标开关
+        chk_cursor = tk.Checkbutton(btn_container, text="录制鼠标", variable=self.record_cursor_var, bg=self.bg_color, fg="#dddddd", selectcolor="#333333", activebackground=self.bg_color, activeforeground="#ffffff", font=("Segoe UI", 10))
+        chk_cursor.pack(side=tk.LEFT, padx=10)
 
+        # 细边框
+        tk.Frame(parent, bg="#444444", width=1).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(parent, bg="#444444", width=1).pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Frame(parent, bg="#444444", height=1).pack(side=tk.BOTTOM, fill=tk.X)
+
+    # ==========================
+    # 通用功能 (复用)
+    # ==========================
     def select_area(self):
-        self.root.iconify() # 最小化
-        # 这里因为是无边框窗口，iconify可能表现不同，但withdraw会导致无法恢复，所以用iconify
+        self.root.iconify()
         time.sleep(0.2)
         top = Toplevel(self.root)
         top.attributes('-fullscreen', True, '-alpha', 0.3)
@@ -202,9 +339,9 @@ class ProfessionalRecorder:
             if h % 2 != 0: h -= 1
             if w > 50 and h > 50:
                 self.region = (x1, y1, w, h)
-                self.lbl_info.config(text=f"选区: {w}x{h} @ ({x1},{y1})")
+                self.lbl_info.config(text=f"Region: {w}x{h}")
             top.destroy()
-            self.root.deiconify() # 恢复
+            self.root.deiconify()
         canvas.bind("<Button-1>", on_down); canvas.bind("<B1-Motion>", on_drag); canvas.bind("<ButtonRelease-1>", on_up)
         top.bind("<Escape>", lambda e: [top.destroy(), self.root.deiconify()])
 
@@ -223,14 +360,38 @@ class ProfessionalRecorder:
             while self.is_recording: ffmpeg_process.stdin.write(stream.read(1024))
         except: pass
 
+    def setup_tray(self):
+        def show_window(icon, item):
+            self.root.deiconify()
+            self.root.lift()
+        def quit_app(icon, item):
+            self.root.after(0, self.kill_app)
+        menu = (item('显示主界面', show_window, default=True), item('退出', quit_app))
+        self.tray_icon = pystray.Icon("name", self.icon_img, "录屏助手", menu)
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def minimize_to_tray(self):
+        self.root.withdraw()
+
+    def kill_app(self):
+        if self.is_recording:
+             if not messagebox.askyesno("Confirm", "Stop recording and exit?", parent=self.root):
+                 return
+             self.stop_recording()
+        if self.tray_icon: self.tray_icon.stop()
+        self.root.destroy()
+        os._exit(0)
+
     def start_recording(self):
         self.is_recording = True
         self.btn_start.config(state=tk.DISABLED, bg="#555555")
         self.btn_stop.config(state=tk.NORMAL)
+        self.btn_mini_start.config(state=tk.DISABLED, bg="#555555")
+        self.btn_mini_stop.config(state=tk.NORMAL)
         
         if self.tray_icon:
             self.tray_icon.icon = self.rec_icon_img
-            self.tray_icon.title = "录屏中..."
+            self.tray_icon.title = "Recording..."
         
         filename = f"Capture_{int(time.time())}.mp4"
         p = pyaudio.PyAudio()
@@ -263,13 +424,16 @@ class ProfessionalRecorder:
         self.is_recording = False
         if self.tray_icon:
             self.tray_icon.icon = self.icon_img
-            self.tray_icon.title = "录屏助手 - 待机"
+            self.tray_icon.title = "Ready"
         if self.process:
             try: self.process.stdin.close(); self.process.wait(timeout=3)
             except: self.process.kill()
+        
         self.btn_start.config(state=tk.NORMAL, bg="#0078d4")
         self.btn_stop.config(state=tk.DISABLED)
-        messagebox.showinfo("完成", "录制已保存！")
+        self.btn_mini_start.config(state=tk.NORMAL, bg="#0078d4")
+        self.btn_mini_stop.config(state=tk.DISABLED)
+        messagebox.showinfo("Done", f"Saved!")
 
 if __name__ == "__main__":
     root = tk.Tk()
