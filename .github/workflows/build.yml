@@ -21,28 +21,33 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 移除 pywin32，回归纯净稳定版
+        # 安装绘图和打包所需的库
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Download Professional Icon
-      shell: pwsh
+    - name: Generate High-Res Icon (Local)
+      shell: python
       run: |
-        # 直接下载一个现成的、格式标准的 ICO 文件
-        # 这是一个红色的录制按钮风格图标，非常适合录屏软件
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/fluentui-system-icons/master/assets/Record/ic_fluent_record_24_regular.svg" -OutFile "icon.svg"
-        # 由于直接下载ico可能不稳定，我们还是用Python转一下确保万无一失，但这次源是标准的
-        python -c "
         from PIL import Image, ImageDraw
-        # 画一个简单粗暴的高清图标，确保格式绝对标准
-        img = Image.new('RGBA', (256, 256), (0,0,0,0))
+        
+        # 1. 创建一个 256x256 的高清画布 (RGBA透明)
+        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        # 外部白圈
-        draw.ellipse((10,10,246,246), fill=(255,255,255))
-        # 内部红点
-        draw.ellipse((40,40,216,216), fill=(234, 51, 35))
-        # 保存
-        img.save('app_icon.ico', format='ICO', sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])
-        "
+        
+        # 2. 绘制 "录制风格" 的图标
+        # 外圈 (白色背景)
+        draw.ellipse((10, 10, 246, 246), fill=(245, 245, 245), outline=(200, 200, 200), width=2)
+        # 中圈 (深灰色装饰)
+        draw.ellipse((40, 40, 216, 216), outline=(220, 220, 220), width=5)
+        # 内圈 (鲜艳的红色录制点)
+        draw.ellipse((60, 60, 196, 196), fill=(234, 51, 35))
+        # 高光 (增加立体感)
+        draw.ellipse((140, 70, 180, 110), fill=(255, 255, 255, 100))
+        
+        # 3. 生成包含所有标准尺寸的 ICO 文件
+        # 这确保了在 Windows 资源管理器的大图标、小图标、列表视图里都清晰
+        sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
+        img.save('app_icon.ico', format='ICO', sizes=sizes)
+        print("Icon generated successfully!")
 
     - name: Download FFmpeg (Static Build)
       shell: pwsh
@@ -58,7 +63,8 @@ jobs:
     - name: Build EXE
       run: |
         # --clean 清理缓存
-        # --noconsole 确保没有黑框
+        # --noconsole 隐藏黑框
+        # --icon 指定刚才生成的图标
         pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
