@@ -9,18 +9,22 @@ import ctypes
 from PIL import Image, ImageDraw, ImageTk
 import pystray
 from pystray import MenuItem as item
-import pyaudiowpatch as pyaudio
+# 暂时屏蔽音频库，防止它占用设备导致死锁
+# import pyaudiowpatch as pyaudio
 
-# --- 1. 强制高DPI识别 (防止画面模糊) ---
-myappid = 'mycompany.recorder.obs.mode'
+# --- 1. 系统级高 DPI 感知 (必须开启，否则分辨率获取错误导致黑屏) ---
+myappid = 'mycompany.recorder.obs.v5'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
     pass
 try:
+    # 设置 DPI 感知等级为 PerMonitorV2
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
-    pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except: pass
 
 def resource_path(relative_path):
     try:
@@ -32,7 +36,7 @@ def resource_path(relative_path):
 class ProfessionalRecorder:
     def __init__(self, root):
         self.root = root
-        self.root.title("Pro Recorder (High-Perf Mode)")
+        self.root.title("Recorder (Video Only Mode)")
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
 
@@ -75,6 +79,13 @@ class ProfessionalRecorder:
         self.root.bind("<ButtonPress-1>", self.start_action)
         self.root.bind("<ButtonRelease-1>", self.stop_action)
         self.root.bind("<B1-Motion>", self.do_action)
+
+        # 启动自检
+        self.check_ffmpeg()
+
+    def check_ffmpeg(self):
+        if not os.path.exists(self.ffmpeg_path):
+            messagebox.showerror("Error", f"FFmpeg missing at: {self.ffmpeg_path}")
 
     def create_internal_icon(self, size, color):
         image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -171,7 +182,11 @@ class ProfessionalRecorder:
         def on_up(e):
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0]-e.x), abs(self.sel_start[1]-e.y)
-            # 这里不需要再强制 -1，FFmpeg 的 pad 滤镜会帮我们搞定偶数问题
+            
+            # 确保选区也是偶数
+            if w % 2 != 0: w -= 1
+            if h % 2 != 0: h -= 1
+            
             if w > 50 and h > 50:
                 self.region = (x1, y1, w, h)
                 self.lbl_info.config(text=f"Region: {w}x{h} (Ready)")
@@ -192,37 +207,13 @@ class ProfessionalRecorder:
             tw.geometry(f"{g[2]}x{g[3]}+{g[0]}+{g[1]}")
             self.border_windows.append(tw)
 
-    # --- 录制核心 (高性能 ddagrab + 自动防崩) ---
+    # --- 录制核心 (OBS 纯净模式) ---
     def start_recording(self):
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
-        threading.Thread(target=self._start_recording_thread, daemon=True).start()
+        threading.Thread(target=self._real_start, daemon=True).start()
 
-    def _start_recording_thread(self):
-        p = pyaudio.PyAudio()
-        stream = None
-        audio_args = []
-        try:
-            wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-            default = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
-            loopback = default
-            if not default.get("isLoopbackDevice", False):
-                for dev in p.get_loopback_device_info_generator():
-                    if default["name"] in dev["name"]:
-                        loopback = dev
-                        break
-            
-            stream = p.open(format=pyaudio.paInt16, channels=2, rate=int(loopback["defaultSampleRate"]),
-                            frames_per_buffer=1024, input=True, input_device_index=loopback["index"])
-            
-            audio_args = ['-f', 's16le', '-ar', str(int(loopback["defaultSampleRate"])), '-ac', '2', '-i', 'pipe:0']
-        except Exception:
-            # 音频挂了也不影响视频
-            audio_args = []
-
-        self.root.after(0, lambda: self._real_start(p, stream, audio_args))
-
-    def _real_start(self, p, stream, audio_args):
+    def _real_start(self):
         self.is_recording = True
         self.start_time = time.time()
         self.update_timer()
@@ -233,71 +224,67 @@ class ProfessionalRecorder:
         self.btn_mini_stop.config(state=tk.NORMAL)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
 
-        # 1. 保存到桌面
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         if not os.path.exists(desktop): desktop = os.path.expanduser("~")
         self.current_output_file = os.path.join(desktop, f"Rec_{int(time.time())}.mp4")
 
-        # 2. 高性能参数 (ddagrab)
-        # -rtbufsize 150M: 关键！给内存缓冲，防止还没开始写硬盘就溢出崩溃
-        # -thread_queue_size 1024: 防止多线程阻塞
-        video_args = ['-f', 'ddagrab', '-framerate', '30', '-rtbufsize', '150M', '-thread_queue_size', '1024']
+        # --- 核心修复：在 Python 层计算偶数分辨率 ---
+        # 这比让 FFmpeg 滤镜计算更稳，因为滤镜可能因为语法问题崩掉
+        real_w = self.root.winfo_screenwidth()
+        real_h = self.root.winfo_screenheight()
         
-        # 3. 处理选区 vs 全屏
+        # 强制偶数
+        if real_w % 2 != 0: real_w -= 1
+        if real_h % 2 != 0: real_h -= 1
+
+        # ddagrab: 性能之王 (OBS 同款)
+        # 注意：这里没有任何 audio 参数，也没有 filters，只为了保证画面。
+        video_args = ['-f', 'ddagrab', '-framerate', '30', '-video_size', f'{real_w}x{real_h}']
+        
         if self.region:
-            x, y, w, h = self.region
-            video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
+            rx, ry, rw, rh = self.region
+            # 选区也强制偶数
+            if rw % 2 != 0: rw -= 1
+            if rh % 2 != 0: rh -= 1
+            video_args = ['-f', 'ddagrab', '-framerate', '30', 
+                          '-offset_x', str(rx), '-offset_y', str(ry), '-video_size', f"{rw}x{rh}"]
         
+        # 输入：桌面
         video_args.extend(['-i', 'desktop'])
 
-        # 4. 【核心修复】防止0KB崩溃的终极滤镜
-        # ddagrab 抓取的可能是奇数分辨率（如1366x768缩放后），libx264 不支持奇数会直接闪退。
-        # pad=ceil(iw/2)*2:ceil(ih/2)*2 -> 强制把宽和高补齐为偶数。
-        filter_cmd = ['-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2']
+        cmd = [self.ffmpeg_path, '-y'] + video_args + \
+              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p'] + \
+              [self.current_output_file]
 
-        cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + filter_cmd + \
-              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p']
-        
-        if audio_args:
-            cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
-        
-        cmd.append(self.current_output_file)
+        # 打印命令到控制台 (方便调试)
+        print(f"Running FFmpeg: {cmd}")
 
-        # 启动 (保留黑框以便观察，如果稳定了可以再隐藏)
-        # 为了调试，我先去掉 CREATE_NO_WINDOW，如果弹窗一闪而过且没文件，说明参数依然有错
+        # 显式打开窗口，让用户看到 FFmpeg 是否活着
+        # 如果窗口一闪而过，说明参数还是错的
+        # 如果窗口一直开着并在跑数据，说明成功了
         startupinfo = subprocess.STARTUPINFO()
-        # startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW # 这行注释掉，让黑框显示出来，方便你排查
+        # 去掉 NO_WINDOW，让它显示黑框
+        # startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW 
 
         try:
-            # 注意：这里不隐藏窗口，如果你想最终发布时隐藏，把 creationflags 改回 subprocess.CREATE_NO_WINDOW
-            self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE if stream else subprocess.DEVNULL,
+            # stdin 用 DEVNULL，因为没有音频流，不要悬空
+            self.process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
-            if stream:
-                threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process), daemon=True).start()
-
-            # 启动一个监控线程，如果 FFmpeg 1秒内就退出了，说明启动失败
-            threading.Thread(target=self.check_early_exit, args=(self.process,), daemon=True).start()
+            # 监控线程：如果 2 秒内进程死了，说明参数错
+            threading.Thread(target=self.check_health, args=(self.process,), daemon=True).start()
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to start FFmpeg:\n{e}")
+            messagebox.showerror("Error", f"Start Failed:\n{e}")
             self._reset_ui()
 
-    def check_early_exit(self, proc):
-        time.sleep(1.5)
+    def check_health(self, proc):
+        time.sleep(2)
         if proc.poll() is not None:
             # 进程已死
-            stderr_output = proc.stderr.read().decode('utf-8', errors='ignore')
-            if "0KB" in stderr_output or "failed" in stderr_output or "Error" in stderr_output:
-                pass # 其实可以在这里弹窗，但我们在 stop_recording 里统一处理
-            print(f"FFmpeg died early: {stderr_output}") # 方便调试
-
-    def audio_pipe_worker(self, stream, proc):
-        while self.is_recording and proc.poll() is None:
-            try:
-                data = stream.read(1024)
-                proc.stdin.write(data)
-            except: break
+            err = proc.stderr.read().decode('utf-8', errors='ignore')
+            print("FFmpeg died early:", err)
+            # 这里不弹窗，等到 stop 时统一处理
 
     def stop_recording(self):
         self.btn_stop.config(text="Saving...", state=tk.DISABLED)
@@ -306,11 +293,12 @@ class ProfessionalRecorder:
     def _stop_recording_thread(self):
         self.is_recording = False
         if self.process:
-            if self.process.stdin: 
-                try: self.process.stdin.close()
-                except: pass
-            try: self.process.wait(timeout=5)
-            except: self.process.kill()
+            try:
+                # 发送 'q' 给 ffmpeg 退出 (但在 windows 管道很难，直接 terminate 比较稳)
+                self.process.terminate()
+                self.process.wait(timeout=3)
+            except: 
+                self.process.kill()
         
         self.root.after(0, self._finish_stop)
 
@@ -318,16 +306,16 @@ class ProfessionalRecorder:
         if self.tray_icon: self.tray_icon.icon = self.icon_img
         self._reset_ui()
 
+        # 检查结果
         if os.path.exists(self.current_output_file) and os.path.getsize(self.current_output_file) > 1024:
             try: subprocess.run(f'explorer /select,"{self.current_output_file}"')
             except: pass
+            messagebox.showinfo("Success", "Video Saved (Video Only Mode).\n\nIf this works, the previous issue was AUDIO.")
         else:
-            # 引导用户
-            msg = "Recording failed (0KB or missing).\n\n"
-            msg += "Possible Reason: 'Dual Graphics' laptop issue.\n"
-            msg += "FFmpeg might be running on the wrong GPU (NVIDIA instead of Intel).\n"
-            msg += "Please try running this EXE with 'Right Click -> Run with graphics processor -> Integrated graphics'."
-            messagebox.showerror("Failed", msg)
+            # 如果这次还是失败，那说明 FFmpeg 在你的显卡环境下完全不可用
+            # 但既然 OBS 能用，这概率极低。
+            # 唯一的可能是 ddagrab 的索引不对。
+            messagebox.showerror("Failed", "Recording still failed (0KB).\n\nPlease send me the screenshot of the Black Console Window if it appeared.")
 
     def _reset_ui(self):
         self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
