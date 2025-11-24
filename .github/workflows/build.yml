@@ -23,18 +23,37 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Download Assets (Icon & FFmpeg)
+    - name: Generate High-Quality Icon (Python Script)
+      shell: python
+      run: |
+        from PIL import Image, ImageDraw
+        
+        # 制作一个多尺寸的“眼球”图标
+        def create_eye_icon(size):
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            # 外眼球 (白色)
+            draw.ellipse((0, 0, size, size), fill=(240, 240, 240))
+            # 虹膜 (蓝色渐变模拟 - 简化为深蓝)
+            iris_r = size * 0.6
+            center = size / 2
+            draw.ellipse((center - iris_r/2, center - iris_r/2, center + iris_r/2, center + iris_r/2), fill=(30, 144, 255))
+            # 瞳孔 (黑色)
+            pupil_r = size * 0.3
+            draw.ellipse((center - pupil_r/2, center - pupil_r/2, center + pupil_r/2, center + pupil_r/2), fill=(20, 20, 20))
+            # 高光 (白色反光)
+            highlight_r = size * 0.1
+            draw.ellipse((center + pupil_r/3, center - pupil_r/3, center + pupil_r/3 + highlight_r, center - pupil_r/3 + highlight_r), fill=(255, 255, 255, 200))
+            return img
+
+        # 生成包含 256, 128, 64, 48, 32, 16 尺寸的标准 ICO
+        img_256 = create_eye_icon(256)
+        img_256.save("app_icon.ico", format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+        print("Icon generated successfully.")
+
+    - name: Download FFmpeg (Static Build)
       shell: pwsh
       run: |
-        Write-Host "Downloading Professional Icon..."
-        # 直接下载一个包含完整尺寸层级(16-256px)的标准图标
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/fluentui-system-icons/master/assets/Record/ic_fluent_record_48_filled.svg" -OutFile "icon.svg"
-        
-        # 使用 Python 将 SVG/PNG 转换为完美的 ICO
-        # 这里我们下载一个 png 转换，或者直接用 PIL 生成一个绝对标准的
-        python -c "from PIL import Image, ImageDraw; img = Image.new('RGBA', (256, 256), (0,0,0,0)); draw = ImageDraw.Draw(img); draw.ellipse((10,10,246,246), fill='white'); draw.ellipse((40,40,216,216), fill='#ff0000'); img.save('app_icon.ico', format='ICO', sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])"
-
-        Write-Host "Downloading FFmpeg..."
         Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip" -UserAgent "NativeHost"
         Expand-Archive ffmpeg.zip -DestinationPath .
         $ffmpegPath = Get-ChildItem -Path . -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
@@ -42,14 +61,13 @@ jobs:
 
     - name: Build EXE
       run: |
-        # --clean: 清除缓存
-        # --icon: 指定图标
-        # --add-data: 将图标打包进程序
+        # 注意：这里使用 --add-binary 确保 ffmpeg 被放入正确的内部目录
+        # 使用 Generated 的 app_icon.ico
         pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ProRecorder-Fixed-EXE
+        name: ProRecorder-Final-EXE
         path: dist/ProRecorder.exe
         compression-level: 0
