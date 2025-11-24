@@ -11,8 +11,8 @@ import pystray
 from pystray import MenuItem as item
 import pyaudiowpatch as pyaudio
 
-# --- 强制设置 ---
-myappid = 'mycompany.recorder.debug.visible'
+# --- 1. 强制高DPI识别 (防止画面模糊) ---
+myappid = 'mycompany.recorder.obs.mode'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
@@ -32,7 +32,7 @@ def resource_path(relative_path):
 class ProfessionalRecorder:
     def __init__(self, root):
         self.root = root
-        self.root.title("Recorder (Visible Console Mode)")
+        self.root.title("Pro Recorder (High-Perf Mode)")
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
 
@@ -51,15 +51,11 @@ class ProfessionalRecorder:
         self.process = None
         self.ffmpeg_path = resource_path("ffmpeg.exe")
         self.current_output_file = ""
-        self.log_buffer = []
 
         self.record_cursor_var = tk.BooleanVar(value=True)
         self.border_windows = []
         self._drag_data = {"x": 0, "y": 0, "mode": None}
         self.resize_margin = 10
-
-        # --- 生成手动测试脚本 ---
-        self.create_debug_bat()
 
         # 图标
         icon_path = resource_path("app_icon.ico")
@@ -79,44 +75,6 @@ class ProfessionalRecorder:
         self.root.bind("<ButtonPress-1>", self.start_action)
         self.root.bind("<ButtonRelease-1>", self.stop_action)
         self.root.bind("<B1-Motion>", self.do_action)
-
-    def log(self, message):
-        print(message)
-        self.log_buffer.append(message)
-
-    def create_debug_bat(self):
-        """ 在桌面生成一个手动测试脚本，用于排查是否是 Python 的问题 """
-        try:
-            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-            bat_path = os.path.join(desktop, "手动测试_VideoOnly.bat")
-            
-            # 一个最简单的 FFmpeg 命令，只录画面，不录声音，显示详细日志
-            # 使用引号包裹路径以防有空格
-            cmd = f'"{self.ffmpeg_path}" -f gdigrab -framerate 30 -i desktop -c:v libx264 -preset ultrafast "{os.path.join(desktop, "debug_test.mp4")}"'
-            
-            content = f"""@echo off
-echo =================================================
-echo [DEBUG] Manual FFmpeg Test
-echo This script tests if FFmpeg can run on your system.
-echo =================================================
-echo.
-echo Executing:
-echo {cmd}
-echo.
-{cmd}
-echo.
-echo =================================================
-echo If you see errors above, please screenshot this window.
-echo If the window closes instantly, FFmpeg crashed.
-echo =================================================
-pause
-"""
-            with open(bat_path, "w", encoding="gbk") as f: # 使用 gbk 兼容中文 Windows CMD
-                f.write(content)
-            
-            self.log(f"Debug BAT created at: {bat_path}")
-        except Exception as e:
-            self.log(f"Failed to create debug bat: {e}")
 
     def create_internal_icon(self, size, color):
         image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -213,8 +171,7 @@ pause
         def on_up(e):
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0]-e.x), abs(self.sel_start[1]-e.y)
-            w = w if w % 2 == 0 else w - 1
-            h = h if h % 2 == 0 else h - 1
+            # 这里不需要再强制 -1，FFmpeg 的 pad 滤镜会帮我们搞定偶数问题
             if w > 50 and h > 50:
                 self.region = (x1, y1, w, h)
                 self.lbl_info.config(text=f"Region: {w}x{h} (Ready)")
@@ -235,9 +192,8 @@ pause
             tw.geometry(f"{g[2]}x{g[3]}+{g[0]}+{g[1]}")
             self.border_windows.append(tw)
 
-    # --- 录制核心 (显式窗口模式) ---
+    # --- 录制核心 (高性能 ddagrab + 自动防崩) ---
     def start_recording(self):
-        self.log_buffer = []
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
         threading.Thread(target=self._start_recording_thread, daemon=True).start()
@@ -246,9 +202,7 @@ pause
         p = pyaudio.PyAudio()
         stream = None
         audio_args = []
-        
         try:
-            # 音频初始化
             wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
             loopback = default
@@ -262,11 +216,9 @@ pause
                             frames_per_buffer=1024, input=True, input_device_index=loopback["index"])
             
             audio_args = ['-f', 's16le', '-ar', str(int(loopback["defaultSampleRate"])), '-ac', '2', '-i', 'pipe:0']
-            
         except Exception:
-            # 静默失败，转为无声录制
+            # 音频挂了也不影响视频
             audio_args = []
-            stream = None
 
         self.root.after(0, lambda: self._real_start(p, stream, audio_args))
 
@@ -281,38 +233,64 @@ pause
         self.btn_mini_stop.config(state=tk.NORMAL)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
 
+        # 1. 保存到桌面
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         if not os.path.exists(desktop): desktop = os.path.expanduser("~")
         self.current_output_file = os.path.join(desktop, f"Rec_{int(time.time())}.mp4")
 
-        # 使用 gdigrab
-        video_args = ['-f', 'gdigrab', '-framerate', '30']
+        # 2. 高性能参数 (ddagrab)
+        # -rtbufsize 150M: 关键！给内存缓冲，防止还没开始写硬盘就溢出崩溃
+        # -thread_queue_size 1024: 防止多线程阻塞
+        video_args = ['-f', 'ddagrab', '-framerate', '30', '-rtbufsize', '150M', '-thread_queue_size', '1024']
+        
+        # 3. 处理选区 vs 全屏
         if self.region:
             x, y, w, h = self.region
             video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
+        
         video_args.extend(['-i', 'desktop'])
 
-        cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + \
+        # 4. 【核心修复】防止0KB崩溃的终极滤镜
+        # ddagrab 抓取的可能是奇数分辨率（如1366x768缩放后），libx264 不支持奇数会直接闪退。
+        # pad=ceil(iw/2)*2:ceil(ih/2)*2 -> 强制把宽和高补齐为偶数。
+        filter_cmd = ['-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2']
+
+        cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + filter_cmd + \
               ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p']
         
         if audio_args:
-            cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
+            cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
         
         cmd.append(self.current_output_file)
 
-        # 【核心修改】：不隐藏窗口！让用户看到黑框
-        # 去掉 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        # 去掉 creationflags=subprocess.CREATE_NO_WINDOW
-        
+        # 启动 (保留黑框以便观察，如果稳定了可以再隐藏)
+        # 为了调试，我先去掉 CREATE_NO_WINDOW，如果弹窗一闪而过且没文件，说明参数依然有错
+        startupinfo = subprocess.STARTUPINFO()
+        # startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW # 这行注释掉，让黑框显示出来，方便你排查
+
         try:
+            # 注意：这里不隐藏窗口，如果你想最终发布时隐藏，把 creationflags 改回 subprocess.CREATE_NO_WINDOW
             self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE if stream else subprocess.DEVNULL,
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                                            
+            
             if stream:
                 threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process), daemon=True).start()
+
+            # 启动一个监控线程，如果 FFmpeg 1秒内就退出了，说明启动失败
+            threading.Thread(target=self.check_early_exit, args=(self.process,), daemon=True).start()
+
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to start: {e}")
+            messagebox.showerror("Error", f"Failed to start FFmpeg:\n{e}")
             self._reset_ui()
+
+    def check_early_exit(self, proc):
+        time.sleep(1.5)
+        if proc.poll() is not None:
+            # 进程已死
+            stderr_output = proc.stderr.read().decode('utf-8', errors='ignore')
+            if "0KB" in stderr_output or "failed" in stderr_output or "Error" in stderr_output:
+                pass # 其实可以在这里弹窗，但我们在 stop_recording 里统一处理
+            print(f"FFmpeg died early: {stderr_output}") # 方便调试
 
     def audio_pipe_worker(self, stream, proc):
         while self.is_recording and proc.poll() is None:
@@ -344,10 +322,11 @@ pause
             try: subprocess.run(f'explorer /select,"{self.current_output_file}"')
             except: pass
         else:
-            # 引导用户去运行桌面脚本
-            msg = "Recording failed (0KB).\n\n"
-            msg += "A debugging script '手动测试_VideoOnly.bat' has been created on your Desktop.\n"
-            msg += "Please double-click it. If it fails, send me a screenshot of the black window."
+            # 引导用户
+            msg = "Recording failed (0KB or missing).\n\n"
+            msg += "Possible Reason: 'Dual Graphics' laptop issue.\n"
+            msg += "FFmpeg might be running on the wrong GPU (NVIDIA instead of Intel).\n"
+            msg += "Please try running this EXE with 'Right Click -> Run with graphics processor -> Integrated graphics'."
             messagebox.showerror("Failed", msg)
 
     def _reset_ui(self):
