@@ -38,7 +38,7 @@ class ProfessionalRecorder:
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
         
-        # 居中
+        # 窗口居中
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -48,10 +48,10 @@ class ProfessionalRecorder:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.last_geometry = f"{w}x{h}+{x}+{y}"
         
-        # 变量
+        # 核心变量
         self.is_recording = False
         self.is_mini_mode = False
-        self.start_time = 0 # 录制开始时间
+        self.start_time = 0
         self.process = None
         self.audio_thread = None
         self.region = None 
@@ -59,7 +59,10 @@ class ProfessionalRecorder:
         self.tray_icon = None
         self.record_cursor_var = tk.BooleanVar(value=True)
         
-        # 拖拽
+        # 边框窗口列表 (用于持久显示范围)
+        self.border_windows = []
+        
+        # 拖拽相关
         self._drag_data = {"x": 0, "y": 0, "mode": None}
         self.resize_margin = 10 
         
@@ -72,7 +75,6 @@ class ProfessionalRecorder:
         self.setup_ui() 
         self.setup_tray()
         
-        # 绑定
         self.root.bind("<Motion>", self.check_cursor)
         self.root.bind("<ButtonPress-1>", self.start_action)
         self.root.bind("<ButtonRelease-1>", self.stop_action)
@@ -82,7 +84,7 @@ class ProfessionalRecorder:
             messagebox.showerror("Error", f"Kernel missing: {self.ffmpeg_path}")
 
     # ==========================
-    # 物理引擎 (拖拽/拉伸)
+    # 物理引擎 (拖拽)
     # ==========================
     def check_cursor(self, event):
         if self.is_mini_mode: return
@@ -166,87 +168,7 @@ class ProfessionalRecorder:
             self.root.attributes('-topmost', False)
 
     # ==========================
-    # UI 构建
-    # ==========================
-    def setup_ui(self):
-        self.bg_color = "#1e1e1e"
-        self.title_bg = "#2d2d2d"
-        
-        self.normal_frame = tk.Frame(self.root, bg=self.bg_color)
-        self.normal_frame.pack(fill=tk.BOTH, expand=True)
-        self.mini_frame = tk.Frame(self.root, bg="#333", highlightthickness=1, highlightbackground="#555")
-        
-        self.build_normal_ui()
-        self.build_mini_ui()
-
-    def build_mini_ui(self):
-        p = self.mini_frame
-        btn_s = {"bd": 0, "width": 4, "font": ("Arial", 10)}
-        tk.Button(p, text="⤢", bg="#444", fg="white", command=self.toggle_mini_mode, **btn_s).pack(side=tk.LEFT, fill=tk.Y, padx=1)
-        tk.Button(p, text="⛶", bg="#333", fg="white", command=self.select_area, **btn_s).pack(side=tk.LEFT, fill=tk.Y, padx=1)
-        self.btn_mini_cur = tk.Button(p, text="🖱️", bg="#333", fg="#0f0", command=self.toggle_cursor_mini, **btn_s)
-        self.btn_mini_cur.pack(side=tk.LEFT, fill=tk.Y, padx=1)
-        
-        # 计时器/拖动区 (Mini)
-        self.lbl_mini_timer = tk.Label(p, text="00:00:00", bg="#333", fg="#bbb", font=("Consolas", 10))
-        self.lbl_mini_timer.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-        
-        self.btn_mini_stop = tk.Button(p, text="⬛", bg="#d32f2f", fg="white", command=self.stop_recording, state=tk.DISABLED, **btn_s)
-        self.btn_mini_stop.pack(side=tk.RIGHT, fill=tk.Y, padx=1)
-        self.btn_mini_start = tk.Button(p, text="▶", bg="#1976d2", fg="white", command=self.start_recording, **btn_s)
-        self.btn_mini_start.pack(side=tk.RIGHT, fill=tk.Y, padx=1)
-
-    def toggle_cursor_mini(self):
-        v = self.record_cursor_var.get()
-        self.record_cursor_var.set(not v)
-        self.btn_mini_cur.config(fg="#0f0" if not v else "#555")
-
-    def build_normal_ui(self):
-        p = self.normal_frame
-        # 标题栏
-        t_bar = tk.Frame(p, bg=self.title_bg, height=40)
-        t_bar.pack(side=tk.TOP, fill=tk.X)
-        t_bar.pack_propagate(False)
-        t_bar.bind("<ButtonPress-1>", self.start_action) # 确保可拖动
-        
-        lbl = tk.Label(t_bar, image=self.tk_icon, bg=self.title_bg, bd=0)
-        lbl.pack(side=tk.LEFT, padx=10)
-        tk.Label(t_bar, text="Pro Recorder", bg=self.title_bg, fg="#eee", font=("Segoe UI", 10)).pack(side=tk.LEFT)
-        
-        btn_s = {"bd": 0, "width": 4, "font": ("Arial", 11)}
-        tk.Button(t_bar, text="✕", bg=self.title_bg, fg="#aaa", activebackground="red", command=self.kill_app, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Button(t_bar, text="⤢", bg=self.title_bg, fg="#aaa", command=self.toggle_mini_mode, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Button(t_bar, text="─", bg=self.title_bg, fg="#aaa", command=self.minimize_to_tray, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
-
-        # 内容区
-        c_frame = tk.Frame(p, bg=self.bg_color)
-        c_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 计时器 (Normal)
-        self.lbl_main_timer = tk.Label(c_frame, text="00:00:00", font=("Segoe UI", 36), bg=self.bg_color, fg="#555")
-        self.lbl_main_timer.place(relx=0.5, rely=0.4, anchor=tk.CENTER)
-        self.lbl_info = tk.Label(c_frame, text="Ready", font=("Segoe UI", 10), bg=self.bg_color, fg="#777")
-        self.lbl_info.place(relx=0.5, rely=0.55, anchor=tk.CENTER)
-
-        # 底部栏
-        b_frame = tk.Frame(c_frame, bg=self.bg_color, height=90)
-        b_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=20)
-        row = tk.Frame(b_frame, bg=self.bg_color)
-        row.pack(anchor=tk.CENTER)
-        
-        tk.Button(row, text="⛶ Area", command=self.select_area, bg="#333", fg="white", bd=0, padx=15, pady=8).pack(side=tk.LEFT, padx=5)
-        self.btn_start = tk.Button(row, text="▶ Start", command=self.start_recording, bg="#1976d2", fg="white", bd=0, padx=20, pady=8)
-        self.btn_start.pack(side=tk.LEFT, padx=5)
-        self.btn_stop = tk.Button(row, text="⬛ Stop", command=self.stop_recording, bg="#d32f2f", fg="white", bd=0, padx=20, pady=8, state=tk.DISABLED)
-        self.btn_stop.pack(side=tk.LEFT, padx=5)
-        tk.Checkbutton(row, text="Cursor", variable=self.record_cursor_var, bg=self.bg_color, fg="#ddd", selectcolor="#333", activebackground=self.bg_color, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=10)
-        
-        tk.Frame(p, bg="#444", width=1).pack(side=tk.LEFT, fill=tk.Y)
-        tk.Frame(p, bg="#444", width=1).pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Frame(p, bg="#444", height=1).pack(side=tk.BOTTOM, fill=tk.X)
-
-    # ==========================
-    # 计时器逻辑
+    # 计时器
     # ==========================
     def update_timer(self):
         if self.is_recording:
@@ -255,70 +177,89 @@ class ProfessionalRecorder:
             m = (elapsed % 3600) // 60
             s = elapsed % 60
             time_str = f"{h:02}:{m:02}:{s:02}"
-            
-            # 更新两个界面的时间
-            self.lbl_main_timer.config(text=time_str, fg="#d32f2f") # 录制时变红
+            self.lbl_main_timer.config(text=time_str, fg="#d32f2f")
             self.lbl_mini_timer.config(text=f"REC {time_str}", fg="#d32f2f")
-            
             self.root.after(1000, self.update_timer)
 
     # ==========================
-    # 选区逻辑 (修复点击无效)
+    # 选区逻辑 (修复：持久显示)
     # ==========================
+    def clear_borders(self):
+        """ 清除屏幕上的红框 """
+        for win in self.border_windows:
+            try: win.destroy()
+            except: pass
+        self.border_windows = []
+
+    def draw_permanent_border(self, x, y, w, h):
+        """ 在屏幕上绘制 4 个独立的窗口作为边框，中间穿透 """
+        thickness = 3
+        color = "red"
+        
+        # 定义 4 个边框的几何信息
+        # (x, y, width, height)
+        geoms = [
+            (x, y, w, thickness),           # Top
+            (x, y + h - thickness, w, thickness), # Bottom
+            (x, y, thickness, h),           # Left
+            (x + w - thickness, y, thickness, h)  # Right
+        ]
+        
+        for gx, gy, gw, gh in geoms:
+            tw = Toplevel(self.root)
+            tw.overrideredirect(True) # 无边框
+            tw.attributes('-topmost', True) # 置顶
+            tw.geometry(f"{gw}x{gh}+{gx}+{gy}")
+            tw.config(bg=color)
+            self.border_windows.append(tw)
+
     def select_area(self):
-        # 不要最小化，否则用户可能觉得程序消失了
-        # self.root.iconify() 
+        # 开始新选区前，清除旧的边框
+        self.clear_borders()
         
         top = Toplevel(self.root)
         top.attributes('-fullscreen', True)
-        top.attributes('-topmost', True) # 强制置顶！
-        top.attributes('-alpha', 0.4)    # 稍微不那么透明，更容易看见
-        top.config(bg='white', cursor='cross') # 用白色背景，对比度更高
-        
+        top.attributes('-topmost', True)
+        top.attributes('-alpha', 0.4)
+        top.config(bg='white', cursor='cross')
         canvas = Canvas(top, bg="white", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
-        
         self.sel_start = [0, 0]
         
-        def on_down(e):
-            self.sel_start = [e.x, e.y]
-
+        def on_down(e): self.sel_start = [e.x, e.y]
         def on_drag(e):
             canvas.delete("rect")
-            # 画一个显眼的红框
             canvas.create_rectangle(self.sel_start[0], self.sel_start[1], e.x, e.y, outline="red", width=3, tags="rect")
-            # 显示实时尺寸
             w, h = abs(e.x - self.sel_start[0]), abs(e.y - self.sel_start[1])
             canvas.delete("txt")
             canvas.create_text(e.x + 20, e.y + 20, text=f"{w}x{h}", fill="red", font=("Arial", 14, "bold"), tags="txt")
-
         def on_up(e):
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0] - e.x), abs(self.sel_start[1] - e.y)
             
-            # --- 核心修复：强制偶数分辨率 ---
-            # FFmpeg x264 要求分辨率必须是 2 的倍数
+            # 偶数修正
             if w % 2 != 0: w -= 1
             if h % 2 != 0: h -= 1
-            if x1 % 2 != 0: x1 -= 1 # 某些旧版ffmpeg对offset也有偶数要求
+            if x1 % 2 != 0: x1 -= 1
             if y1 % 2 != 0: y1 -= 1
             
             if w > 50 and h > 50:
                 self.region = (x1, y1, w, h)
                 self.lbl_info.config(text=f"Region: {w}x{h} (Ready)")
+                # 绘制持久化边框
+                self.draw_permanent_border(x1, y1, w, h)
             
             top.destroy()
-            self.root.deiconify() # 确保主界面回来
+            self.root.deiconify()
 
         canvas.bind("<Button-1>", on_down)
         canvas.bind("<B1-Motion>", on_drag)
         canvas.bind("<ButtonRelease-1>", on_up)
-        # 右键或ESC取消
         top.bind("<Button-3>", lambda e: top.destroy()) 
         top.bind("<Escape>", lambda e: top.destroy())
 
     # ==========================
-    # 音频设备 (带容错)
+    # 音频 & 录制 (修复死锁)
     # ==========================
     def get_default_loopback_device(self, p):
         try:
@@ -328,24 +269,43 @@ class ProfessionalRecorder:
                 for loopback in p.get_loopback_device_info_generator():
                     if default_speakers["name"] in loopback["name"]: return loopback
             else: return default_speakers
-        except Exception as e:
-            print(f"Audio Error: {e}") # 打印错误但不崩溃
-            return None
+        except: return None
 
     def audio_pipe_worker(self, stream, ffmpeg_process):
         try:
             while self.is_recording: ffmpeg_process.stdin.write(stream.read(1024))
         except: pass
 
-    # ==========================
-    # 录制逻辑 (修复损坏文件)
-    # ==========================
     def start_recording(self):
+        p = pyaudio.PyAudio()
+        loopback_dev = self.get_default_loopback_device(p)
+        audio_args = []
+        stream = None
+        
+        # 音频设备检查
+        if not loopback_dev:
+            ans = messagebox.askyesno("No Audio", "Audio device not found.\nRecord video only?")
+            if not ans: 
+                p.terminate()
+                return 
+        else:
+            try:
+                stream = p.open(format=pyaudio.paInt16, channels=loopback_dev["maxInputChannels"], 
+                                rate=int(loopback_dev["defaultSampleRate"]), frames_per_buffer=1024, 
+                                input=True, input_device_index=loopback_dev["index"])
+                audio_args = ['-f', 's16le', '-ar', str(int(loopback_dev["defaultSampleRate"])), 
+                              '-ac', str(loopback_dev["maxInputChannels"]), '-i', 'pipe:0']
+            except Exception as e:
+                if not messagebox.askyesno("Audio Error", f"Audio Init Failed: {e}\nRecord video only?"):
+                    p.terminate()
+                    return
+                audio_args = []
+
+        # 准备就绪
         self.is_recording = True
         self.start_time = time.time()
-        self.update_timer() # 启动计时器
+        self.update_timer()
         
-        # 按钮状态
         self.btn_start.config(state=tk.DISABLED, bg="#555")
         self.btn_stop.config(state=tk.NORMAL)
         self.btn_mini_start.config(state=tk.DISABLED, bg="#555")
@@ -354,48 +314,22 @@ class ProfessionalRecorder:
         
         filename = f"Capture_{int(time.time())}.mp4"
         
-        # --- 音频容错处理 ---
-        audio_args = []
-        stream = None
-        p = None
-        try:
-            p = pyaudio.PyAudio()
-            loopback_dev = self.get_default_loopback_device(p)
-            if loopback_dev:
-                stream = p.open(format=pyaudio.paInt16, channels=loopback_dev["maxInputChannels"], 
-                                rate=int(loopback_dev["defaultSampleRate"]), frames_per_buffer=1024, 
-                                input=True, input_device_index=loopback_dev["index"])
-                audio_args = ['-f', 's16le', '-ar', str(int(loopback_dev["defaultSampleRate"])), 
-                              '-ac', str(loopback_dev["maxInputChannels"]), '-i', 'pipe:0']
-            else:
-                self.lbl_info.config(text="No Audio (Video Only)")
-        except Exception:
-            self.lbl_info.config(text="Audio Error (Video Only)")
-            audio_args = [] # 确保即使音频失败，也重置为空，只录视频
-        
-        # 视频参数
         mouse_flag = '1' if self.record_cursor_var.get() else '0'
         video_args = ['-f', 'gdigrab', '-framerate', '30', '-draw_mouse', mouse_flag]
-        
         if self.region:
             x, y, w, h = self.region
             video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
         video_args.extend(['-i', 'desktop'])
         
-        # 组合命令
         cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + \
               ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p']
-        
-        if audio_args:
-            cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
-        
+        if audio_args: cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
         cmd.append(filename)
         
-        # 启动
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         
-        # 使用 stdin=subprocess.PIPE 仅当有音频时，否则给 DEVNULL 防止 ffmpeg 等待输入
+        # 关键修复：无音频时，stdin 必须为 DEVNULL，否则FFmpeg卡死
         stdin_stream = subprocess.PIPE if audio_args else subprocess.DEVNULL
         
         self.process = subprocess.Popen(cmd, stdin=stdin_stream, stdout=subprocess.PIPE, 
@@ -408,8 +342,10 @@ class ProfessionalRecorder:
 
     def stop_recording(self):
         self.is_recording = False
-        if self.tray_icon: self.tray_icon.icon = self.icon_img
+        # 录制结束后，清除边框 (根据需求，也可以保留，这里选择保留直到下次选区)
+        # self.clear_borders() 
         
+        if self.tray_icon: self.tray_icon.icon = self.icon_img
         if self.process:
             try: 
                 if self.process.stdin: self.process.stdin.close()
@@ -417,18 +353,79 @@ class ProfessionalRecorder:
             except: 
                 self.process.kill()
         
-        # 恢复界面
         self.btn_start.config(state=tk.NORMAL, bg="#1976d2")
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_mini_start.config(state=tk.NORMAL, bg="#1976d2")
         self.btn_mini_stop.config(state=tk.DISABLED)
-        
         self.lbl_main_timer.config(text="00:00:00", fg="#555")
         self.lbl_mini_timer.config(text="00:00:00", fg="#bbb")
         
         messagebox.showinfo("Done", f"Saved!")
 
-    # ... (Tray and Kill logic remains same) ...
+    # ==========================
+    # UI 构建 (保持不变)
+    # ==========================
+    def setup_ui(self):
+        self.bg_color = "#1e1e1e"
+        self.title_bg = "#2d2d2d"
+        self.normal_frame = tk.Frame(self.root, bg=self.bg_color)
+        self.normal_frame.pack(fill=tk.BOTH, expand=True)
+        self.mini_frame = tk.Frame(self.root, bg="#333", highlightthickness=1, highlightbackground="#555")
+        self.build_normal_ui()
+        self.build_mini_ui()
+
+    def build_mini_ui(self):
+        p = self.mini_frame
+        btn_s = {"bd": 0, "width": 4, "font": ("Arial", 10)}
+        tk.Button(p, text="⤢", bg="#444", fg="white", command=self.toggle_mini_mode, **btn_s).pack(side=tk.LEFT, fill=tk.Y, padx=1)
+        tk.Button(p, text="⛶", bg="#333", fg="white", command=self.select_area, **btn_s).pack(side=tk.LEFT, fill=tk.Y, padx=1)
+        self.btn_mini_cur = tk.Button(p, text="🖱️", bg="#333", fg="#0f0", command=self.toggle_cursor_mini, **btn_s)
+        self.btn_mini_cur.pack(side=tk.LEFT, fill=tk.Y, padx=1)
+        self.lbl_mini_timer = tk.Label(p, text="00:00:00", bg="#333", fg="#bbb", font=("Consolas", 10))
+        self.lbl_mini_timer.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        self.btn_mini_stop = tk.Button(p, text="⬛", bg="#d32f2f", fg="white", command=self.stop_recording, state=tk.DISABLED, **btn_s)
+        self.btn_mini_stop.pack(side=tk.RIGHT, fill=tk.Y, padx=1)
+        self.btn_mini_start = tk.Button(p, text="▶", bg="#1976d2", fg="white", command=self.start_recording, **btn_s)
+        self.btn_mini_start.pack(side=tk.RIGHT, fill=tk.Y, padx=1)
+
+    def toggle_cursor_mini(self):
+        v = self.record_cursor_var.get()
+        self.record_cursor_var.set(not v)
+        self.btn_mini_cur.config(fg="#0f0" if not v else "#555")
+
+    def build_normal_ui(self):
+        p = self.normal_frame
+        t_bar = tk.Frame(p, bg=self.title_bg, height=40)
+        t_bar.pack(side=tk.TOP, fill=tk.X)
+        t_bar.pack_propagate(False)
+        t_bar.bind("<ButtonPress-1>", self.start_action)
+        lbl = tk.Label(t_bar, image=self.tk_icon, bg=self.title_bg, bd=0)
+        lbl.pack(side=tk.LEFT, padx=10)
+        tk.Label(t_bar, text="Pro Recorder", bg=self.title_bg, fg="#eee", font=("Segoe UI", 10)).pack(side=tk.LEFT)
+        btn_s = {"bd": 0, "width": 4, "font": ("Arial", 11)}
+        tk.Button(t_bar, text="✕", bg=self.title_bg, fg="#aaa", activebackground="red", command=self.kill_app, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Button(t_bar, text="⤢", bg=self.title_bg, fg="#aaa", command=self.toggle_mini_mode, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Button(t_bar, text="─", bg=self.title_bg, fg="#aaa", command=self.minimize_to_tray, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
+        c_frame = tk.Frame(p, bg=self.bg_color)
+        c_frame.pack(fill=tk.BOTH, expand=True)
+        self.lbl_main_timer = tk.Label(c_frame, text="00:00:00", font=("Segoe UI", 36), bg=self.bg_color, fg="#555")
+        self.lbl_main_timer.place(relx=0.5, rely=0.4, anchor=tk.CENTER)
+        self.lbl_info = tk.Label(c_frame, text="Ready", font=("Segoe UI", 10), bg=self.bg_color, fg="#777")
+        self.lbl_info.place(relx=0.5, rely=0.55, anchor=tk.CENTER)
+        b_frame = tk.Frame(c_frame, bg=self.bg_color, height=90)
+        b_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=20)
+        row = tk.Frame(b_frame, bg=self.bg_color)
+        row.pack(anchor=tk.CENTER)
+        tk.Button(row, text="⛶ Area", command=self.select_area, bg="#333", fg="white", bd=0, padx=15, pady=8).pack(side=tk.LEFT, padx=5)
+        self.btn_start = tk.Button(row, text="▶ Start", command=self.start_recording, bg="#1976d2", fg="white", bd=0, padx=20, pady=8)
+        self.btn_start.pack(side=tk.LEFT, padx=5)
+        self.btn_stop = tk.Button(row, text="⬛ Stop", command=self.stop_recording, bg="#d32f2f", fg="white", bd=0, padx=20, pady=8, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(row, text="Cursor", variable=self.record_cursor_var, bg=self.bg_color, fg="#ddd", selectcolor="#333", activebackground=self.bg_color, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=10)
+        tk.Frame(p, bg="#444", width=1).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(p, bg="#444", width=1).pack(side=tk.RIGHT, fill=tk.Y)
+        tk.Frame(p, bg="#444", height=1).pack(side=tk.BOTTOM, fill=tk.X)
+
     def setup_tray(self):
         def show_window(icon, item):
             self.root.deiconify()
