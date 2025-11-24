@@ -11,38 +11,31 @@ import pystray
 from pystray import MenuItem as item
 import pyaudiowpatch as pyaudio
 
-# --- 1. 强制系统设置 ---
-myappid = 'mycompany.recorder.final.debug'
+# --- 强制设置 ---
+myappid = 'mycompany.recorder.debug.visible'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
     pass
-
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
     pass
 
-# --- 2. 路径处理 (增加容错) ---
 def resource_path(relative_path):
-    """ 获取资源路径，增加多重判断确保找到文件 """
     try:
-        # PyInstaller 创建的临时文件夹
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
-    
-    path = os.path.join(base_path, relative_path)
-    return path
+    return os.path.join(base_path, relative_path)
 
 class ProfessionalRecorder:
     def __init__(self, root):
         self.root = root
-        self.root.title("Pro Recorder (Debug Mode)")
+        self.root.title("Recorder (Visible Console Mode)")
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
 
-        # 屏幕居中
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -58,26 +51,23 @@ class ProfessionalRecorder:
         self.process = None
         self.ffmpeg_path = resource_path("ffmpeg.exe")
         self.current_output_file = ""
-        
-        # 用于在内存中存储日志，不再写文件
-        self.log_buffer = [] 
+        self.log_buffer = []
 
         self.record_cursor_var = tk.BooleanVar(value=True)
         self.border_windows = []
         self._drag_data = {"x": 0, "y": 0, "mode": None}
         self.resize_margin = 10
 
-        # --- 3. 启动时自检 (关键修复) ---
-        self.check_integrity()
+        # --- 生成手动测试脚本 ---
+        self.create_debug_bat()
 
-        # 图标处理
+        # 图标
         icon_path = resource_path("app_icon.ico")
         if os.path.exists(icon_path):
             self.icon_img = Image.open(icon_path)
             self.root.iconbitmap(icon_path)
         else:
             self.icon_img = self.create_internal_icon(64, (234, 51, 35))
-        
         self.tk_icon = ImageTk.PhotoImage(self.icon_img)
         self.root.iconphoto(True, self.tk_icon)
         self.rec_icon_img = self.create_internal_icon(64, (255, 0, 0))
@@ -91,21 +81,42 @@ class ProfessionalRecorder:
         self.root.bind("<B1-Motion>", self.do_action)
 
     def log(self, message):
-        """ 内存日志记录 """
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
-        entry = f"[{timestamp}] {message}"
-        print(entry)
-        self.log_buffer.append(entry)
+        print(message)
+        self.log_buffer.append(message)
 
-    def check_integrity(self):
-        """ 检查核心组件是否存在 """
-        self.log(f"App started. Looking for FFmpeg at: {self.ffmpeg_path}")
-        if not os.path.exists(self.ffmpeg_path):
-            self.log("CRITICAL: ffmpeg.exe NOT FOUND!")
-            messagebox.showerror("Fatal Error", 
-                f"Core component missing!\n\nExpected at: {self.ffmpeg_path}\n\nPlease check your antivirus or build process.")
-        else:
-            self.log("FFmpeg found successfully.")
+    def create_debug_bat(self):
+        """ 在桌面生成一个手动测试脚本，用于排查是否是 Python 的问题 """
+        try:
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            bat_path = os.path.join(desktop, "手动测试_VideoOnly.bat")
+            
+            # 一个最简单的 FFmpeg 命令，只录画面，不录声音，显示详细日志
+            # 使用引号包裹路径以防有空格
+            cmd = f'"{self.ffmpeg_path}" -f gdigrab -framerate 30 -i desktop -c:v libx264 -preset ultrafast "{os.path.join(desktop, "debug_test.mp4")}"'
+            
+            content = f"""@echo off
+echo =================================================
+echo [DEBUG] Manual FFmpeg Test
+echo This script tests if FFmpeg can run on your system.
+echo =================================================
+echo.
+echo Executing:
+echo {cmd}
+echo.
+{cmd}
+echo.
+echo =================================================
+echo If you see errors above, please screenshot this window.
+echo If the window closes instantly, FFmpeg crashed.
+echo =================================================
+pause
+"""
+            with open(bat_path, "w", encoding="gbk") as f: # 使用 gbk 兼容中文 Windows CMD
+                f.write(content)
+            
+            self.log(f"Debug BAT created at: {bat_path}")
+        except Exception as e:
+            self.log(f"Failed to create debug bat: {e}")
 
     def create_internal_icon(self, size, color):
         image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -224,26 +235,22 @@ class ProfessionalRecorder:
             tw.geometry(f"{g[2]}x{g[3]}+{g[0]}+{g[1]}")
             self.border_windows.append(tw)
 
-    # --- 4. 录制逻辑 (全面增加异常捕获) ---
+    # --- 录制核心 (显式窗口模式) ---
     def start_recording(self):
-        self.log_buffer = [] # 清空日志
-        self.log("User clicked Start.")
+        self.log_buffer = []
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
         threading.Thread(target=self._start_recording_thread, daemon=True).start()
 
     def _start_recording_thread(self):
-        # A. 音频设备获取
         p = pyaudio.PyAudio()
         stream = None
         audio_args = []
         
         try:
-            self.log("Initializing Audio...")
+            # 音频初始化
             wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
-            
-            # 尝试寻找 Loopback
             loopback = default
             if not default.get("isLoopbackDevice", False):
                 for dev in p.get_loopback_device_info_generator():
@@ -251,17 +258,14 @@ class ProfessionalRecorder:
                         loopback = dev
                         break
             
-            self.log(f"Audio Device: {loopback['name']} (Rate: {loopback['defaultSampleRate']})")
-            
             stream = p.open(format=pyaudio.paInt16, channels=2, rate=int(loopback["defaultSampleRate"]),
                             frames_per_buffer=1024, input=True, input_device_index=loopback["index"])
             
             audio_args = ['-f', 's16le', '-ar', str(int(loopback["defaultSampleRate"])), '-ac', '2', '-i', 'pipe:0']
             
-        except Exception as e:
-            self.log(f"Audio Warning: {e}")
-            self.log("Proceeding with VIDEO ONLY mode.")
-            audio_args = [] # 音频失败，清空参数，确保视频能录
+        except Exception:
+            # 静默失败，转为无声录制
+            audio_args = []
             stream = None
 
         self.root.after(0, lambda: self._real_start(p, stream, audio_args))
@@ -277,64 +281,38 @@ class ProfessionalRecorder:
         self.btn_mini_stop.config(state=tk.NORMAL)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
 
-        # B. 文件路径
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        if not os.path.exists(desktop): 
-            desktop = os.path.expanduser("~")
+        if not os.path.exists(desktop): desktop = os.path.expanduser("~")
         self.current_output_file = os.path.join(desktop, f"Rec_{int(time.time())}.mp4")
-        self.log(f"Saving to: {self.current_output_file}")
 
-        # C. 视频参数 (使用最稳的 gdigrab)
+        # 使用 gdigrab
         video_args = ['-f', 'gdigrab', '-framerate', '30']
         if self.region:
             x, y, w, h = self.region
             video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
         video_args.extend(['-i', 'desktop'])
 
-        # D. 启动 FFmpeg
         cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + \
-              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-probesize', '50M']
+              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p']
         
         if audio_args:
             cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
         
         cmd.append(self.current_output_file)
-        
-        # 将命令转为字符串记录，方便调试
-        self.log(f"CMD: {' '.join(cmd)}")
 
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        # 【核心修改】：不隐藏窗口！让用户看到黑框
+        # 去掉 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        # 去掉 creationflags=subprocess.CREATE_NO_WINDOW
         
         try:
-            # 关键：捕获 stderr 到管道，不再写文件
             self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE if stream else subprocess.DEVNULL,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                            startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
-            
-            # 启动监控线程，读取 FFmpeg 输出
-            threading.Thread(target=self.monitor_ffmpeg_output, args=(self.process,), daemon=True).start()
-
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                            
             if stream:
                 threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process), daemon=True).start()
-                
         except Exception as e:
-            self.log(f"Popen Error: {e}")
-            messagebox.showerror("Startup Error", f"Failed to launch FFmpeg:\n{e}")
+            messagebox.showerror("Error", f"Failed to start: {e}")
             self._reset_ui()
-
-    def monitor_ffmpeg_output(self, proc):
-        """ 实时读取 FFmpeg 的错误输出 """
-        while True:
-            line = proc.stderr.readline()
-            if not line: break
-            try:
-                # 记录最后 20 行日志即可，避免内存爆炸
-                txt = line.decode('utf-8', errors='ignore').strip()
-                if txt:
-                    self.log_buffer.append(txt)
-                    if len(self.log_buffer) > 50: self.log_buffer.pop(0)
-            except: pass
 
     def audio_pipe_worker(self, stream, proc):
         while self.is_recording and proc.poll() is None:
@@ -348,7 +326,6 @@ class ProfessionalRecorder:
         threading.Thread(target=self._stop_recording_thread, daemon=True).start()
 
     def _stop_recording_thread(self):
-        self.log("Stopping recording...")
         self.is_recording = False
         if self.process:
             if self.process.stdin: 
@@ -363,36 +340,15 @@ class ProfessionalRecorder:
         if self.tray_icon: self.tray_icon.icon = self.icon_img
         self._reset_ui()
 
-        # E. 结果检查 (最关键的一步)
         if os.path.exists(self.current_output_file) and os.path.getsize(self.current_output_file) > 1024:
-            # 成功：打开文件夹
             try: subprocess.run(f'explorer /select,"{self.current_output_file}"')
             except: pass
         else:
-            # 失败：显示内存中的日志
-            log_content = "\n".join(self.log_buffer[-15:]) # 只显示最后15行
-            self.show_error_report(log_content)
-
-    def show_error_report(self, log_content):
-        # 创建一个弹窗显示详细日志
-        top = Toplevel(self.root)
-        top.title("Recording Failed - Debug Log")
-        top.geometry("600x400")
-        
-        lbl = tk.Label(top, text="Recording failed (0KB). Here is the FFmpeg log:", fg="red", font=("Arial", 10, "bold"))
-        lbl.pack(pady=5)
-        
-        txt = tk.Text(top, bg="#eee", font=("Consolas", 9))
-        txt.pack(fill="both", expand=True, padx=10, pady=5)
-        txt.insert("1.0", log_content)
-        
-        btn = tk.Button(top, text="Copy to Clipboard", command=lambda: self.copy_to_clip(top, log_content))
-        btn.pack(pady=5)
-
-    def copy_to_clip(self, win, text):
-        win.clipboard_clear()
-        win.clipboard_append(text)
-        messagebox.showinfo("Copied", "Log copied to clipboard!")
+            # 引导用户去运行桌面脚本
+            msg = "Recording failed (0KB).\n\n"
+            msg += "A debugging script '手动测试_VideoOnly.bat' has been created on your Desktop.\n"
+            msg += "Please double-click it. If it fails, send me a screenshot of the black window."
+            messagebox.showerror("Failed", msg)
 
     def _reset_ui(self):
         self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
