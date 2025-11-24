@@ -11,8 +11,8 @@ import pystray
 from pystray import MenuItem as item
 import pyaudiowpatch as pyaudio
 
-# --- 图标和系统设置 (保持不动) ---
-myappid = 'mycompany.recorder.pro.v2' # 更新版本号避免缓存
+# --- 1. 强制系统设置 ---
+myappid = 'mycompany.recorder.final.debug'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
@@ -23,20 +23,26 @@ try:
 except Exception:
     pass
 
+# --- 2. 路径处理 (增加容错) ---
 def resource_path(relative_path):
+    """ 获取资源路径，增加多重判断确保找到文件 """
     try:
+        # PyInstaller 创建的临时文件夹
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    
+    path = os.path.join(base_path, relative_path)
+    return path
 
 class ProfessionalRecorder:
     def __init__(self, root):
         self.root = root
-        self.root.title("Pro Recorder")
+        self.root.title("Pro Recorder (Debug Mode)")
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
 
+        # 屏幕居中
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -51,18 +57,20 @@ class ProfessionalRecorder:
         self.start_time = 0
         self.process = None
         self.ffmpeg_path = resource_path("ffmpeg.exe")
-        
-        # 记录输出文件路径
         self.current_output_file = ""
-        # 日志文件路径 (用于调试)
-        self.log_file = os.path.join(os.path.expanduser("~"), "Desktop", "recorder_debug.txt")
+        
+        # 用于在内存中存储日志，不再写文件
+        self.log_buffer = [] 
 
         self.record_cursor_var = tk.BooleanVar(value=True)
         self.border_windows = []
         self._drag_data = {"x": 0, "y": 0, "mode": None}
         self.resize_margin = 10
 
-        # --- 图标逻辑 (保持不动) ---
+        # --- 3. 启动时自检 (关键修复) ---
+        self.check_integrity()
+
+        # 图标处理
         icon_path = resource_path("app_icon.ico")
         if os.path.exists(icon_path):
             self.icon_img = Image.open(icon_path)
@@ -82,6 +90,23 @@ class ProfessionalRecorder:
         self.root.bind("<ButtonRelease-1>", self.stop_action)
         self.root.bind("<B1-Motion>", self.do_action)
 
+    def log(self, message):
+        """ 内存日志记录 """
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        entry = f"[{timestamp}] {message}"
+        print(entry)
+        self.log_buffer.append(entry)
+
+    def check_integrity(self):
+        """ 检查核心组件是否存在 """
+        self.log(f"App started. Looking for FFmpeg at: {self.ffmpeg_path}")
+        if not os.path.exists(self.ffmpeg_path):
+            self.log("CRITICAL: ffmpeg.exe NOT FOUND!")
+            messagebox.showerror("Fatal Error", 
+                f"Core component missing!\n\nExpected at: {self.ffmpeg_path}\n\nPlease check your antivirus or build process.")
+        else:
+            self.log("FFmpeg found successfully.")
+
     def create_internal_icon(self, size, color):
         image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
@@ -90,7 +115,7 @@ class ProfessionalRecorder:
         draw.ellipse((c-size*0.3, c-size*0.3, c+size*0.3, c+size*0.3), fill=color)
         return image
 
-    # --- 窗口拖拽调整 (保持不动) ---
+    # --- 窗口拖拽 (保持不变) ---
     def check_cursor(self, event):
         if self.is_mini_mode: return
         x, y, w, h = event.x, event.y, self.root.winfo_width(), self.root.winfo_height()
@@ -199,27 +224,34 @@ class ProfessionalRecorder:
             tw.geometry(f"{g[2]}x{g[3]}+{g[0]}+{g[1]}")
             self.border_windows.append(tw)
 
-    # --- 录制核心 (重大修改：换回 gdigrab) ---
+    # --- 4. 录制逻辑 (全面增加异常捕获) ---
     def start_recording(self):
+        self.log_buffer = [] # 清空日志
+        self.log("User clicked Start.")
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
         threading.Thread(target=self._start_recording_thread, daemon=True).start()
 
     def _start_recording_thread(self):
-        # 音频部分保持尝试，但增加容错
+        # A. 音频设备获取
         p = pyaudio.PyAudio()
         stream = None
         audio_args = []
+        
         try:
+            self.log("Initializing Audio...")
             wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
-            loopback = default
             
+            # 尝试寻找 Loopback
+            loopback = default
             if not default.get("isLoopbackDevice", False):
                 for dev in p.get_loopback_device_info_generator():
                     if default["name"] in dev["name"]:
                         loopback = dev
                         break
+            
+            self.log(f"Audio Device: {loopback['name']} (Rate: {loopback['defaultSampleRate']})")
             
             stream = p.open(format=pyaudio.paInt16, channels=2, rate=int(loopback["defaultSampleRate"]),
                             frames_per_buffer=1024, input=True, input_device_index=loopback["index"])
@@ -227,9 +259,10 @@ class ProfessionalRecorder:
             audio_args = ['-f', 's16le', '-ar', str(int(loopback["defaultSampleRate"])), '-ac', '2', '-i', 'pipe:0']
             
         except Exception as e:
-            print(f"Audio Init Failed: {e}")
-            # 如果音频失败，我们仍然继续录制视频，不传 audio_args 即可
-            audio_args = []
+            self.log(f"Audio Warning: {e}")
+            self.log("Proceeding with VIDEO ONLY mode.")
+            audio_args = [] # 音频失败，清空参数，确保视频能录
+            stream = None
 
         self.root.after(0, lambda: self._real_start(p, stream, audio_args))
 
@@ -244,50 +277,64 @@ class ProfessionalRecorder:
         self.btn_mini_stop.config(state=tk.NORMAL)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
 
-        # 1. 路径逻辑：确保在桌面
+        # B. 文件路径
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        if not os.path.exists(desktop): desktop = os.path.expanduser("~")
+        if not os.path.exists(desktop): 
+            desktop = os.path.expanduser("~")
         self.current_output_file = os.path.join(desktop, f"Rec_{int(time.time())}.mp4")
+        self.log(f"Saving to: {self.current_output_file}")
 
-        # 2. 内核切换：使用 gdigrab (兼容性之王)
-        # 注意：gdigrab 捕获鼠标可能会闪烁，但比 ddagrab 不启动要好
+        # C. 视频参数 (使用最稳的 gdigrab)
         video_args = ['-f', 'gdigrab', '-framerate', '30']
-        
         if self.region:
             x, y, w, h = self.region
-            # gdigrab 的区域录制语法是 -offset_x ...
             video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
-        
         video_args.extend(['-i', 'desktop'])
 
-        # 3. 组合命令：增加 probesize 防止 0KB
+        # D. 启动 FFmpeg
         cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + \
-              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', 
-               '-probesize', '100M', '-analyzeduration', '100M']
+              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-probesize', '50M']
         
         if audio_args:
             cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
         
         cmd.append(self.current_output_file)
+        
+        # 将命令转为字符串记录，方便调试
+        self.log(f"CMD: {' '.join(cmd)}")
 
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         
         try:
-            # 打开 debug log 文件
-            self.log_handle = open(self.log_file, "w", encoding="utf-8")
-            
+            # 关键：捕获 stderr 到管道，不再写文件
             self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE if stream else subprocess.DEVNULL,
-                                            stdout=self.log_handle, stderr=self.log_handle,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                             startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
             
+            # 启动监控线程，读取 FFmpeg 输出
+            threading.Thread(target=self.monitor_ffmpeg_output, args=(self.process,), daemon=True).start()
+
             if stream:
                 threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process), daemon=True).start()
                 
         except Exception as e:
-            if self.log_handle: self.log_handle.close()
-            messagebox.showerror("Start Error", f"{e}")
+            self.log(f"Popen Error: {e}")
+            messagebox.showerror("Startup Error", f"Failed to launch FFmpeg:\n{e}")
             self._reset_ui()
+
+    def monitor_ffmpeg_output(self, proc):
+        """ 实时读取 FFmpeg 的错误输出 """
+        while True:
+            line = proc.stderr.readline()
+            if not line: break
+            try:
+                # 记录最后 20 行日志即可，避免内存爆炸
+                txt = line.decode('utf-8', errors='ignore').strip()
+                if txt:
+                    self.log_buffer.append(txt)
+                    if len(self.log_buffer) > 50: self.log_buffer.pop(0)
+            except: pass
 
     def audio_pipe_worker(self, stream, proc):
         while self.is_recording and proc.poll() is None:
@@ -301,39 +348,51 @@ class ProfessionalRecorder:
         threading.Thread(target=self._stop_recording_thread, daemon=True).start()
 
     def _stop_recording_thread(self):
+        self.log("Stopping recording...")
         self.is_recording = False
         if self.process:
             if self.process.stdin: 
                 try: self.process.stdin.close()
                 except: pass
-            try: self.process.wait(timeout=3)
+            try: self.process.wait(timeout=5)
             except: self.process.kill()
         
-        # 关闭日志
-        try:
-            if hasattr(self, 'log_handle') and self.log_handle:
-                self.log_handle.close()
-        except: pass
-
         self.root.after(0, self._finish_stop)
 
     def _finish_stop(self):
         if self.tray_icon: self.tray_icon.icon = self.icon_img
         self._reset_ui()
 
-        # 结果检查
-        if os.path.exists(self.current_output_file) and os.path.getsize(self.current_output_file) > 0:
-            try:
-                subprocess.run(f'explorer /select,"{self.current_output_file}"')
-            except:
-                pass
+        # E. 结果检查 (最关键的一步)
+        if os.path.exists(self.current_output_file) and os.path.getsize(self.current_output_file) > 1024:
+            # 成功：打开文件夹
+            try: subprocess.run(f'explorer /select,"{self.current_output_file}"')
+            except: pass
         else:
-            # 只有当文件真的也是 0KB 时才报错
-            # 此时引导用户查看日志
-            msg = "Video file is missing or empty (0KB).\n"
-            msg += "We switched to Compatibility Mode (gdigrab) but it still failed.\n\n"
-            msg += f"Please check the log file on your Desktop:\n{self.log_file}"
-            messagebox.showerror("Recording Failed", msg)
+            # 失败：显示内存中的日志
+            log_content = "\n".join(self.log_buffer[-15:]) # 只显示最后15行
+            self.show_error_report(log_content)
+
+    def show_error_report(self, log_content):
+        # 创建一个弹窗显示详细日志
+        top = Toplevel(self.root)
+        top.title("Recording Failed - Debug Log")
+        top.geometry("600x400")
+        
+        lbl = tk.Label(top, text="Recording failed (0KB). Here is the FFmpeg log:", fg="red", font=("Arial", 10, "bold"))
+        lbl.pack(pady=5)
+        
+        txt = tk.Text(top, bg="#eee", font=("Consolas", 9))
+        txt.pack(fill="both", expand=True, padx=10, pady=5)
+        txt.insert("1.0", log_content)
+        
+        btn = tk.Button(top, text="Copy to Clipboard", command=lambda: self.copy_to_clip(top, log_content))
+        btn.pack(pady=5)
+
+    def copy_to_clip(self, win, text):
+        win.clipboard_clear()
+        win.clipboard_append(text)
+        messagebox.showinfo("Copied", "Log copied to clipboard!")
 
     def _reset_ui(self):
         self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
@@ -343,7 +402,7 @@ class ProfessionalRecorder:
         self.lbl_main_timer.config(text="00:00:00", fg="#555")
         self.lbl_mini_timer.config(text="00:00:00", fg="#bbb")
 
-    # --- UI Setup (保持不动) ---
+    # --- UI Setup (保持不变) ---
     def setup_ui(self):
         self.bg_color = "#1e1e1e"
         self.title_bg = "#2d2d2d"
