@@ -11,8 +11,8 @@ import pystray
 from pystray import MenuItem as item
 import pyaudiowpatch as pyaudio
 
-# --- 图标和系统设置 (保持现状，不动) ---
-myappid = 'mycompany.recorder.pro.v1'
+# --- 图标和系统设置 (保持不动) ---
+myappid = 'mycompany.recorder.pro.v2' # 更新版本号避免缓存
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
@@ -50,11 +50,12 @@ class ProfessionalRecorder:
         self.is_mini_mode = False
         self.start_time = 0
         self.process = None
-        self.region = None
         self.ffmpeg_path = resource_path("ffmpeg.exe")
         
         # 记录输出文件路径
         self.current_output_file = ""
+        # 日志文件路径 (用于调试)
+        self.log_file = os.path.join(os.path.expanduser("~"), "Desktop", "recorder_debug.txt")
 
         self.record_cursor_var = tk.BooleanVar(value=True)
         self.border_windows = []
@@ -198,16 +199,18 @@ class ProfessionalRecorder:
             tw.geometry(f"{g[2]}x{g[3]}+{g[0]}+{g[1]}")
             self.border_windows.append(tw)
 
-    # --- 录制核心 (重点修改部分) ---
+    # --- 录制核心 (重大修改：换回 gdigrab) ---
     def start_recording(self):
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
         threading.Thread(target=self._start_recording_thread, daemon=True).start()
 
     def _start_recording_thread(self):
+        # 音频部分保持尝试，但增加容错
         p = pyaudio.PyAudio()
+        stream = None
+        audio_args = []
         try:
-            # 尝试查找 Loopback 设备
             wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
             loopback = default
@@ -222,12 +225,13 @@ class ProfessionalRecorder:
                             frames_per_buffer=1024, input=True, input_device_index=loopback["index"])
             
             audio_args = ['-f', 's16le', '-ar', str(int(loopback["defaultSampleRate"])), '-ac', '2', '-i', 'pipe:0']
-            self.root.after(0, lambda: self._real_start(p, stream, audio_args))
             
         except Exception as e:
-            # 音频失败也强制继续，保证视频能录
-            print(f"Audio failed: {e}")
-            self.root.after(0, lambda: self._real_start(p, None, []))
+            print(f"Audio Init Failed: {e}")
+            # 如果音频失败，我们仍然继续录制视频，不传 audio_args 即可
+            audio_args = []
+
+        self.root.after(0, lambda: self._real_start(p, stream, audio_args))
 
     def _real_start(self, p, stream, audio_args):
         self.is_recording = True
@@ -240,26 +244,26 @@ class ProfessionalRecorder:
         self.btn_mini_stop.config(state=tk.NORMAL)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
 
-        # [关键修复 1] 强制保存到桌面，确保你能找到
+        # 1. 路径逻辑：确保在桌面
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        # 确保桌面路径存在（防止OneDrive干扰）
-        if not os.path.exists(desktop):
-            desktop = os.path.expanduser("~") # 回退到用户主目录
-            
+        if not os.path.exists(desktop): desktop = os.path.expanduser("~")
         self.current_output_file = os.path.join(desktop, f"Rec_{int(time.time())}.mp4")
 
-        # [参数优化] ddagrab 
-        video_args = ['-f', 'ddagrab', '-framerate', '30']
+        # 2. 内核切换：使用 gdigrab (兼容性之王)
+        # 注意：gdigrab 捕获鼠标可能会闪烁，但比 ddagrab 不启动要好
+        video_args = ['-f', 'gdigrab', '-framerate', '30']
         
         if self.region:
             x, y, w, h = self.region
+            # gdigrab 的区域录制语法是 -offset_x ...
             video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
         
         video_args.extend(['-i', 'desktop'])
 
-        # 增加 -probesize 防止初始化慢
+        # 3. 组合命令：增加 probesize 防止 0KB
         cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + \
-              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-probesize', '50M']
+              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', 
+               '-probesize', '100M', '-analyzeduration', '100M']
         
         if audio_args:
             cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
@@ -270,13 +274,19 @@ class ProfessionalRecorder:
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         
         try:
+            # 打开 debug log 文件
+            self.log_handle = open(self.log_file, "w", encoding="utf-8")
+            
             self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE if stream else subprocess.DEVNULL,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            stdout=self.log_handle, stderr=self.log_handle,
                                             startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
+            
             if stream:
                 threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process), daemon=True).start()
+                
         except Exception as e:
-            messagebox.showerror("Error", f"Start Failed:\n{e}")
+            if self.log_handle: self.log_handle.close()
+            messagebox.showerror("Start Error", f"{e}")
             self._reset_ui()
 
     def audio_pipe_worker(self, stream, proc):
@@ -298,25 +308,32 @@ class ProfessionalRecorder:
                 except: pass
             try: self.process.wait(timeout=3)
             except: self.process.kill()
+        
+        # 关闭日志
+        try:
+            if hasattr(self, 'log_handle') and self.log_handle:
+                self.log_handle.close()
+        except: pass
+
         self.root.after(0, self._finish_stop)
 
     def _finish_stop(self):
         if self.tray_icon: self.tray_icon.icon = self.icon_img
         self._reset_ui()
 
-        # [关键修复 2] 录制结束后检查文件
+        # 结果检查
         if os.path.exists(self.current_output_file) and os.path.getsize(self.current_output_file) > 0:
-            # 自动定位到文件
             try:
                 subprocess.run(f'explorer /select,"{self.current_output_file}"')
             except:
                 pass
         else:
-            # 如果文件不存在或为0KB，说明 ddagrab 失败
-            messagebox.showerror("Recording Failed", 
-                "Video file is missing or empty (0KB).\n\n"
-                "Possible cause: 'ddagrab' is not supported on this GPU.\n"
-                "Try running as Administrator or check graphics drivers.")
+            # 只有当文件真的也是 0KB 时才报错
+            # 此时引导用户查看日志
+            msg = "Video file is missing or empty (0KB).\n"
+            msg += "We switched to Compatibility Mode (gdigrab) but it still failed.\n\n"
+            msg += f"Please check the log file on your Desktop:\n{self.log_file}"
+            messagebox.showerror("Recording Failed", msg)
 
     def _reset_ui(self):
         self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
@@ -326,6 +343,7 @@ class ProfessionalRecorder:
         self.lbl_main_timer.config(text="00:00:00", fg="#555")
         self.lbl_mini_timer.config(text="00:00:00", fg="#bbb")
 
+    # --- UI Setup (保持不动) ---
     def setup_ui(self):
         self.bg_color = "#1e1e1e"
         self.title_bg = "#2d2d2d"
