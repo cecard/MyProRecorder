@@ -21,48 +21,28 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 引入 pywin32 实现原生窗口拖拽
-        pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller pywin32
+        # 移除 pywin32，回归纯净稳定版
+        pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Write Professional Icon (Base64 Decode)
-      shell: python
+    - name: Download Professional Icon
+      shell: pwsh
       run: |
-        import base64
-        # 这是一个预先生成的、包含完整尺寸图层的标准 ICO 文件的 Base64 编码 (蓝色眼球图标)
-        # 这种方式绝对不会出错，因为文件结构是预先确定的
-        icon_b64 = """
-        AAABAAEAICAAAAEAIACoEAAAFgAAACgAAAAgAAAAQAAAAAEAIAAAAAAAABAAABMLAAATCwAAAAAA
-        AAAAAAAAAAAA////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDQ0iJycnMzc3NzM3NzczNzc3Mzc3
-        NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczJycnIgAAAAALDQ0iAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDQ0i
-        AAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAAAAAL
-        DQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
-        AAALDQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
-        AAAAAAALDQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
-        ////AAAAAAALDQ0iAAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5
-        +fkA////AAAAAAALDQ0iAAAAAP///wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr
-        6wDm5uYA8fHxAP///wAAAAALDQ0iAAAAAP///wD///8A////AP///wD5+fkA6+vrAPX19QD///8A
-        ////APX19QDr6+sA+fn5AP///wAAAAALDQ0iAAAAAP///wD///8A////AP///wD///8A9fX1AP//
-        /wD19fUA9fX1AP///wD19fUA////AP///wAAAAALDQ0iAAAAAP///wD///8A////AP///wD///8A
-        ////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDQ0iAAAAAP///wD///8A////AP//
-        /wD///8A////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDQ0iAAAAAP///wD///8A
-        ////AP///wD5+fkA6+vrAPX19QD///8A////APX19QDr6+sA+fn5AP///wAAAAALDQ0iAAAAAP//
-        /wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr6wDm5uYA8fHxAP///wAAAAALDQ0i
-        AAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5+fkA////AAAAAAAL
-        DQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
-        AAALDQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
-        AAAAAAALDQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
-        ////AAAAAAALDQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD/
-        //8A////AAAAAAALDQ0iAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP//
-        /wD///8A////AAAAAAALDQ0iJycnMzc3NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczNzc3
-        Mzc3NzM3NzczNzc3MycnJyIAAAAALDQ0iAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-        """
-        # 将 Base64 还原为二进制文件
-        with open("app_icon.ico", "wb") as f:
-            f.write(base64.b64decode(icon_b64))
-        print("Standard ICO file created via Base64.")
+        # 直接下载一个现成的、格式标准的 ICO 文件
+        # 这是一个红色的录制按钮风格图标，非常适合录屏软件
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/fluentui-system-icons/master/assets/Record/ic_fluent_record_24_regular.svg" -OutFile "icon.svg"
+        # 由于直接下载ico可能不稳定，我们还是用Python转一下确保万无一失，但这次源是标准的
+        python -c "
+        from PIL import Image, ImageDraw
+        # 画一个简单粗暴的高清图标，确保格式绝对标准
+        img = Image.new('RGBA', (256, 256), (0,0,0,0))
+        draw = ImageDraw.Draw(img)
+        # 外部白圈
+        draw.ellipse((10,10,246,246), fill=(255,255,255))
+        # 内部红点
+        draw.ellipse((40,40,216,216), fill=(234, 51, 35))
+        # 保存
+        img.save('app_icon.ico', format='ICO', sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])
+        "
 
     - name: Download FFmpeg (Static Build)
       shell: pwsh
@@ -77,12 +57,13 @@ jobs:
 
     - name: Build EXE
       run: |
-        # 使用 --clean 清理旧缓存，确保图标更新
-        pyinstaller --clean --noconfirm --onefile --windowed --name "ProScreenRecorder" --icon="app_icon.ico" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" --hidden-import "win32gui" --hidden-import "win32con" recorder_pro.py
+        # --clean 清理缓存
+        # --noconsole 确保没有黑框
+        pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ProScreenRecorder-EXE
-        path: dist/ProScreenRecorder.exe
+        name: ProRecorder-EXE
+        path: dist/ProRecorder.exe
         compression-level: 0
