@@ -1,30 +1,25 @@
 import tkinter as tk
 from tkinter import messagebox, Toplevel, Canvas
-import subprocess
 import threading
 import time
 import sys
 import os
 import ctypes
+import numpy as np
+import cv2
+import mss
 from PIL import Image, ImageDraw, ImageTk
 import pystray
 from pystray import MenuItem as item
-# 暂时屏蔽音频库，防止它占用设备导致死锁
-# import pyaudiowpatch as pyaudio
 
-# --- 1. 系统级高 DPI 感知 (必须开启，否则分辨率获取错误导致黑屏) ---
-myappid = 'mycompany.recorder.obs.v5'
+# --- 系统设置 ---
+myappid = 'mycompany.recorder.native.v1'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-except Exception:
-    pass
+except Exception: pass
 try:
-    # 设置 DPI 感知等级为 PerMonitorV2
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except: pass
+except Exception: pass
 
 def resource_path(relative_path):
     try:
@@ -36,10 +31,11 @@ def resource_path(relative_path):
 class ProfessionalRecorder:
     def __init__(self, root):
         self.root = root
-        self.root.title("Recorder (Video Only Mode)")
+        self.root.title("Recorder (Native Engine)")
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
 
+        # 居中
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -52,8 +48,7 @@ class ProfessionalRecorder:
         self.is_recording = False
         self.is_mini_mode = False
         self.start_time = 0
-        self.process = None
-        self.ffmpeg_path = resource_path("ffmpeg.exe")
+        self.region = None
         self.current_output_file = ""
 
         self.record_cursor_var = tk.BooleanVar(value=True)
@@ -80,13 +75,6 @@ class ProfessionalRecorder:
         self.root.bind("<ButtonRelease-1>", self.stop_action)
         self.root.bind("<B1-Motion>", self.do_action)
 
-        # 启动自检
-        self.check_ffmpeg()
-
-    def check_ffmpeg(self):
-        if not os.path.exists(self.ffmpeg_path):
-            messagebox.showerror("Error", f"FFmpeg missing at: {self.ffmpeg_path}")
-
     def create_internal_icon(self, size, color):
         image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
@@ -95,7 +83,7 @@ class ProfessionalRecorder:
         draw.ellipse((c-size*0.3, c-size*0.3, c+size*0.3, c+size*0.3), fill=color)
         return image
 
-    # --- 窗口拖拽 (保持不变) ---
+    # --- 窗口拖拽逻辑 (不变) ---
     def check_cursor(self, event):
         if self.is_mini_mode: return
         x, y, w, h = event.x, event.y, self.root.winfo_width(), self.root.winfo_height()
@@ -152,6 +140,7 @@ class ProfessionalRecorder:
             self.root.geometry(self.last_geometry)
             self.root.attributes('-topmost', False)
 
+    # --- 计时器 ---
     def update_timer(self):
         if self.is_recording:
             elapsed = int(time.time() - self.start_time)
@@ -164,6 +153,7 @@ class ProfessionalRecorder:
             except: pass
             self.root.after(1000, self.update_timer)
 
+    # --- 选区逻辑 ---
     def select_area(self):
         self.clear_borders()
         top = Toplevel(self.root)
@@ -182,13 +172,11 @@ class ProfessionalRecorder:
         def on_up(e):
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0]-e.x), abs(self.sel_start[1]-e.y)
-            
-            # 确保选区也是偶数
+            # 强制偶数
             if w % 2 != 0: w -= 1
             if h % 2 != 0: h -= 1
-            
             if w > 50 and h > 50:
-                self.region = (x1, y1, w, h)
+                self.region = {'top': y1, 'left': x1, 'width': w, 'height': h}
                 self.lbl_info.config(text=f"Region: {w}x{h} (Ready)")
                 self.draw_permanent_border(x1, y1, w, h)
             top.destroy()
@@ -207,115 +195,101 @@ class ProfessionalRecorder:
             tw.geometry(f"{g[2]}x{g[3]}+{g[0]}+{g[1]}")
             self.border_windows.append(tw)
 
-    # --- 录制核心 (OBS 纯净模式) ---
+    # --- 核心录制 (MSS + OpenCV) ---
     def start_recording(self):
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
-        threading.Thread(target=self._real_start, daemon=True).start()
-
-    def _real_start(self):
-        self.is_recording = True
-        self.start_time = time.time()
-        self.update_timer()
         
-        self.btn_start.config(text="▶ Recording", bg="#555")
-        self.btn_stop.config(state=tk.NORMAL)
-        self.btn_mini_start.config(state=tk.DISABLED)
-        self.btn_mini_stop.config(state=tk.NORMAL)
-        if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
-
+        # 保存路径
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         if not os.path.exists(desktop): desktop = os.path.expanduser("~")
         self.current_output_file = os.path.join(desktop, f"Rec_{int(time.time())}.mp4")
-
-        # --- 核心修复：在 Python 层计算偶数分辨率 ---
-        # 这比让 FFmpeg 滤镜计算更稳，因为滤镜可能因为语法问题崩掉
-        real_w = self.root.winfo_screenwidth()
-        real_h = self.root.winfo_screenheight()
         
-        # 强制偶数
-        if real_w % 2 != 0: real_w -= 1
-        if real_h % 2 != 0: real_h -= 1
+        threading.Thread(target=self._recording_loop, daemon=True).start()
 
-        # ddagrab: 性能之王 (OBS 同款)
-        # 注意：这里没有任何 audio 参数，也没有 filters，只为了保证画面。
-        video_args = ['-f', 'ddagrab', '-framerate', '30', '-video_size', f'{real_w}x{real_h}']
+    def _recording_loop(self):
+        self.is_recording = True
+        self.start_time = time.time()
         
-        if self.region:
-            rx, ry, rw, rh = self.region
-            # 选区也强制偶数
-            if rw % 2 != 0: rw -= 1
-            if rh % 2 != 0: rh -= 1
-            video_args = ['-f', 'ddagrab', '-framerate', '30', 
-                          '-offset_x', str(rx), '-offset_y', str(ry), '-video_size', f"{rw}x{rh}"]
-        
-        # 输入：桌面
-        video_args.extend(['-i', 'desktop'])
+        # UI 更新
+        self.root.after(0, lambda: self.btn_start.config(text="▶ Recording", bg="#555"))
+        self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
+        self.root.after(0, lambda: self.btn_mini_start.config(state=tk.DISABLED))
+        self.root.after(0, lambda: self.btn_mini_stop.config(state=tk.NORMAL))
+        self.root.after(0, self.update_timer)
+        if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
 
-        cmd = [self.ffmpeg_path, '-y'] + video_args + \
-              ['-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p'] + \
-              [self.current_output_file]
-
-        # 打印命令到控制台 (方便调试)
-        print(f"Running FFmpeg: {cmd}")
-
-        # 显式打开窗口，让用户看到 FFmpeg 是否活着
-        # 如果窗口一闪而过，说明参数还是错的
-        # 如果窗口一直开着并在跑数据，说明成功了
-        startupinfo = subprocess.STARTUPINFO()
-        # 去掉 NO_WINDOW，让它显示黑框
-        # startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW 
-
+        # --- 初始化录制 ---
         try:
-            # stdin 用 DEVNULL，因为没有音频流，不要悬空
-            self.process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
-            # 监控线程：如果 2 秒内进程死了，说明参数错
-            threading.Thread(target=self.check_health, args=(self.process,), daemon=True).start()
+            with mss.mss() as sct:
+                # 确定录制区域
+                if self.region:
+                    monitor = self.region
+                else:
+                    # 全屏：获取主显示器
+                    monitor = sct.monitors[1] # monitors[1] 是主屏，monitors[0] 是所有屏组合
+                
+                width = monitor['width']
+                height = monitor['height']
+
+                # OpenCV VideoWriter 设置
+                # mp4v 编码器是 Windows 兼容性最好的内置编码器之一
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+                # FPS 设为 20 保证性能流畅
+                fps = 20.0
+                out = cv2.VideoWriter(self.current_output_file, fourcc, fps, (width, height))
+
+                if not out.isOpened():
+                    raise Exception("Could not open video writer. Try installing 'opencv-python'.")
+
+                print(f"Recording started: {width}x{height} @ {fps}fps")
+
+                # 循环抓屏
+                while self.is_recording:
+                    loop_start = time.time()
+
+                    # 1. 极速抓屏
+                    img = sct.grab(monitor)
+                    
+                    # 2. 转换为 Numpy 数组 (OpenCV 格式)
+                    frame = np.array(img)
+                    
+                    # 3. 颜色空间转换 (MSS 是 BGRA, OpenCV 需要 BGR)
+                    # 这一步极其高效，几乎不耗时
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+                    # 4. 写入视频帧
+                    out.write(frame)
+
+                    # 5. 帧率控制
+                    elapsed = time.time() - loop_start
+                    wait_time = (1.0 / fps) - elapsed
+                    if wait_time > 0:
+                        time.sleep(wait_time)
+
+                # 结束清理
+                out.release()
+                print("Recording stopped.")
+                
+                self.root.after(0, self._finish_success)
 
         except Exception as e:
-            messagebox.showerror("Error", f"Start Failed:\n{e}")
-            self._reset_ui()
-
-    def check_health(self, proc):
-        time.sleep(2)
-        if proc.poll() is not None:
-            # 进程已死
-            err = proc.stderr.read().decode('utf-8', errors='ignore')
-            print("FFmpeg died early:", err)
-            # 这里不弹窗，等到 stop 时统一处理
+            print(f"Error: {e}")
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Native Recording Failed:\n{e}"))
+            self.root.after(0, self._reset_ui)
 
     def stop_recording(self):
         self.btn_stop.config(text="Saving...", state=tk.DISABLED)
-        threading.Thread(target=self._stop_recording_thread, daemon=True).start()
+        self.is_recording = False # 这会触发循环结束
 
-    def _stop_recording_thread(self):
-        self.is_recording = False
-        if self.process:
-            try:
-                # 发送 'q' 给 ffmpeg 退出 (但在 windows 管道很难，直接 terminate 比较稳)
-                self.process.terminate()
-                self.process.wait(timeout=3)
-            except: 
-                self.process.kill()
-        
-        self.root.after(0, self._finish_stop)
-
-    def _finish_stop(self):
+    def _finish_success(self):
         if self.tray_icon: self.tray_icon.icon = self.icon_img
         self._reset_ui()
-
-        # 检查结果
-        if os.path.exists(self.current_output_file) and os.path.getsize(self.current_output_file) > 1024:
+        
+        if os.path.exists(self.current_output_file):
             try: subprocess.run(f'explorer /select,"{self.current_output_file}"')
             except: pass
-            messagebox.showinfo("Success", "Video Saved (Video Only Mode).\n\nIf this works, the previous issue was AUDIO.")
-        else:
-            # 如果这次还是失败，那说明 FFmpeg 在你的显卡环境下完全不可用
-            # 但既然 OBS 能用，这概率极低。
-            # 唯一的可能是 ddagrab 的索引不对。
-            messagebox.showerror("Failed", "Recording still failed (0KB).\n\nPlease send me the screenshot of the Black Console Window if it appeared.")
+            messagebox.showinfo("Success", "Video Saved!\n(Using MSS+OpenCV Engine)")
 
     def _reset_ui(self):
         self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
@@ -325,7 +299,7 @@ class ProfessionalRecorder:
         self.lbl_main_timer.config(text="00:00:00", fg="#555")
         self.lbl_mini_timer.config(text="00:00:00", fg="#bbb")
 
-    # --- UI Setup (保持不变) ---
+    # --- UI Setup (不变) ---
     def setup_ui(self):
         self.bg_color = "#1e1e1e"
         self.title_bg = "#2d2d2d"
@@ -407,8 +381,7 @@ class ProfessionalRecorder:
         self.root.withdraw()
 
     def kill_app(self):
-        if self.is_recording:
-            self.stop_recording()
+        self.is_recording = False
         if self.tray_icon:
             self.tray_icon.stop()
         self.root.destroy()
