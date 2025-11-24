@@ -4,16 +4,19 @@ import threading
 import time
 import sys
 import os
+import wave
 import ctypes
+import subprocess
 import numpy as np
 import cv2
 import mss
+import pyaudiowpatch as pyaudio
 from PIL import Image, ImageDraw, ImageTk
 import pystray
 from pystray import MenuItem as item
 
 # --- 系统设置 ---
-myappid = 'mycompany.recorder.native.v1'
+myappid = 'mycompany.recorder.av.v1'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception: pass
@@ -28,14 +31,77 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+class AudioRecorder(threading.Thread):
+    """ 独立的音频录制线程 """
+    def __init__(self, filename):
+        super().__init__()
+        self.filename = filename
+        self.recording = False
+        self.p = pyaudio.PyAudio()
+        self.stream = None
+        self.error = None
+
+    def run(self):
+        self.recording = True
+        try:
+            # 寻找 Loopback 设备 (系统内录)
+            wasapi = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_speakers = self.p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+            
+            target_device = default_speakers
+            if not default_speakers["isLoopbackDevice"]:
+                for loopback in self.p.get_loopback_device_info_generator():
+                    if default_speakers["name"] in loopback["name"]:
+                        target_device = loopback
+                        break
+            
+            channels = int(target_device["maxInputChannels"])
+            rate = int(target_device["defaultSampleRate"])
+            
+            # 打开 WAV 文件
+            wf = wave.open(self.filename, 'wb')
+            wf.setnchannels(channels)
+            wf.setsampwidth(self.p.get_sample_size(pyaudio.paInt16))
+            wf.setframerate(rate)
+            
+            def callback(in_data, frame_count, time_info, status):
+                wf.writeframes(in_data)
+                return (in_data, pyaudio.paContinue)
+            
+            self.stream = self.p.open(format=pyaudio.paInt16,
+                                      channels=channels,
+                                      rate=rate,
+                                      frames_per_buffer=1024,
+                                      input=True,
+                                      input_device_index=target_device["index"],
+                                      stream_callback=callback)
+            
+            self.stream.start_stream()
+            
+            # 等待停止信号
+            while self.recording:
+                time.sleep(0.1)
+                
+            self.stream.stop_stream()
+            self.stream.close()
+            wf.close()
+            
+        except Exception as e:
+            self.error = str(e)
+            print(f"Audio Error: {e}")
+        finally:
+            self.p.terminate()
+
+    def stop(self):
+        self.recording = False
+
 class ProfessionalRecorder:
     def __init__(self, root):
         self.root = root
-        self.root.title("Recorder (Native Engine)")
+        self.root.title("Recorder (AV Mux Mode)")
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
 
-        # 居中
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -43,14 +109,20 @@ class ProfessionalRecorder:
         x = (screen_w - w) // 2
         y = (screen_h - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
-        self.last_geometry = f"{w}x{h}+{x}+{y}"
-
+        
         self.is_recording = False
         self.is_mini_mode = False
         self.start_time = 0
         self.region = None
-        self.current_output_file = ""
-
+        
+        # 路径管理
+        self.ffmpeg_path = resource_path("ffmpeg.exe")
+        self.temp_video = ""
+        self.temp_audio = ""
+        self.final_output = ""
+        
+        self.audio_thread = None
+        
         self.record_cursor_var = tk.BooleanVar(value=True)
         self.border_windows = []
         self._drag_data = {"x": 0, "y": 0, "mode": None}
@@ -83,7 +155,7 @@ class ProfessionalRecorder:
         draw.ellipse((c-size*0.3, c-size*0.3, c+size*0.3, c+size*0.3), fill=color)
         return image
 
-    # --- 窗口拖拽逻辑 (不变) ---
+    # --- 窗口操作 (省略重复代码，保持功能一致) ---
     def check_cursor(self, event):
         if self.is_mini_mode: return
         x, y, w, h = event.x, event.y, self.root.winfo_width(), self.root.winfo_height()
@@ -140,7 +212,6 @@ class ProfessionalRecorder:
             self.root.geometry(self.last_geometry)
             self.root.attributes('-topmost', False)
 
-    # --- 计时器 ---
     def update_timer(self):
         if self.is_recording:
             elapsed = int(time.time() - self.start_time)
@@ -153,7 +224,6 @@ class ProfessionalRecorder:
             except: pass
             self.root.after(1000, self.update_timer)
 
-    # --- 选区逻辑 ---
     def select_area(self):
         self.clear_borders()
         top = Toplevel(self.root)
@@ -172,7 +242,6 @@ class ProfessionalRecorder:
         def on_up(e):
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0]-e.x), abs(self.sel_start[1]-e.y)
-            # 强制偶数
             if w % 2 != 0: w -= 1
             if h % 2 != 0: h -= 1
             if w > 50 and h > 50:
@@ -195,23 +264,27 @@ class ProfessionalRecorder:
             tw.geometry(f"{g[2]}x{g[3]}+{g[0]}+{g[1]}")
             self.border_windows.append(tw)
 
-    # --- 核心录制 (MSS + OpenCV) ---
+    # --- 录制核心 (音画分离 + 自动合并) ---
     def start_recording(self):
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
         
-        # 保存路径
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         if not os.path.exists(desktop): desktop = os.path.expanduser("~")
-        self.current_output_file = os.path.join(desktop, f"Rec_{int(time.time())}.mp4")
         
-        threading.Thread(target=self._recording_loop, daemon=True).start()
+        ts = int(time.time())
+        # 1. 临时文件
+        self.temp_video = os.path.join(desktop, f"temp_v_{ts}.mp4")
+        self.temp_audio = os.path.join(desktop, f"temp_a_{ts}.wav")
+        self.final_output = os.path.join(desktop, f"Rec_{ts}.mp4")
+        
+        threading.Thread(target=self._recording_controller, daemon=True).start()
 
-    def _recording_loop(self):
+    def _recording_controller(self):
         self.is_recording = True
         self.start_time = time.time()
         
-        # UI 更新
+        # 更新 UI
         self.root.after(0, lambda: self.btn_start.config(text="▶ Recording", bg="#555"))
         self.root.after(0, lambda: self.btn_stop.config(state=tk.NORMAL))
         self.root.after(0, lambda: self.btn_mini_start.config(state=tk.DISABLED))
@@ -219,77 +292,114 @@ class ProfessionalRecorder:
         self.root.after(0, self.update_timer)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
 
-        # --- 初始化录制 ---
+        # 1. 启动音频线程
+        self.audio_thread = AudioRecorder(self.temp_audio)
+        self.audio_thread.start()
+        
+        # 2. 启动视频录制 (主线程阻塞)
+        self._record_video_loop()
+
+    def _record_video_loop(self):
         try:
             with mss.mss() as sct:
-                # 确定录制区域
                 if self.region:
                     monitor = self.region
                 else:
-                    # 全屏：获取主显示器
-                    monitor = sct.monitors[1] # monitors[1] 是主屏，monitors[0] 是所有屏组合
+                    monitor = sct.monitors[1]
                 
                 width = monitor['width']
                 height = monitor['height']
 
-                # OpenCV VideoWriter 设置
-                # mp4v 编码器是 Windows 兼容性最好的内置编码器之一
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-                # FPS 设为 20 保证性能流畅
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 fps = 20.0
-                out = cv2.VideoWriter(self.current_output_file, fourcc, fps, (width, height))
+                out = cv2.VideoWriter(self.temp_video, fourcc, fps, (width, height))
 
-                if not out.isOpened():
-                    raise Exception("Could not open video writer. Try installing 'opencv-python'.")
-
-                print(f"Recording started: {width}x{height} @ {fps}fps")
-
-                # 循环抓屏
                 while self.is_recording:
                     loop_start = time.time()
-
-                    # 1. 极速抓屏
+                    
                     img = sct.grab(monitor)
-                    
-                    # 2. 转换为 Numpy 数组 (OpenCV 格式)
                     frame = np.array(img)
-                    
-                    # 3. 颜色空间转换 (MSS 是 BGRA, OpenCV 需要 BGR)
-                    # 这一步极其高效，几乎不耗时
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-
-                    # 4. 写入视频帧
+                    
+                    # 绘制光标 (可选)
+                    # 如果你需要录制光标，这里需要额外代码获取光标位置并画圆
+                    # 暂时保持纯净画面
+                    
                     out.write(frame)
 
-                    # 5. 帧率控制
                     elapsed = time.time() - loop_start
                     wait_time = (1.0 / fps) - elapsed
                     if wait_time > 0:
                         time.sleep(wait_time)
-
-                # 结束清理
-                out.release()
-                print("Recording stopped.")
                 
-                self.root.after(0, self._finish_success)
+                out.release()
+                
+                # 停止音频
+                if self.audio_thread:
+                    self.audio_thread.stop()
+                    self.audio_thread.join()
+                
+                self.root.after(0, self._start_merge)
 
         except Exception as e:
-            print(f"Error: {e}")
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Native Recording Failed:\n{e}"))
+            print(f"Video Error: {e}")
+            self.is_recording = False
+            if self.audio_thread: self.audio_thread.stop()
             self.root.after(0, self._reset_ui)
 
     def stop_recording(self):
-        self.btn_stop.config(text="Saving...", state=tk.DISABLED)
-        self.is_recording = False # 这会触发循环结束
+        self.btn_stop.config(text="Merging...", state=tk.DISABLED)
+        self.is_recording = False
 
-    def _finish_success(self):
+    def _start_merge(self):
+        # 合并音视频
+        threading.Thread(target=self._merge_worker, daemon=True).start()
+
+    def _merge_worker(self):
+        # 如果音频录制失败，直接重命名视频文件
+        if not os.path.exists(self.temp_audio) or os.path.getsize(self.temp_audio) < 100:
+            if os.path.exists(self.temp_video):
+                os.rename(self.temp_video, self.final_output)
+                self.root.after(0, lambda: messagebox.showinfo("Done", "Saved Video Only (Audio failed or silent)."))
+        else:
+            # 使用 FFmpeg 合并
+            # -i video -i audio -c:v copy (视频不重编码，秒级完成) -c:a aac (音频转aac)
+            cmd = [
+                self.ffmpeg_path, '-y',
+                '-i', self.temp_video,
+                '-i', self.temp_audio,
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-shortest', # 以最短的流为准
+                self.final_output
+            ]
+            
+            # 隐藏黑框
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+            try:
+                subprocess.run(cmd, startupinfo=startupinfo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # 清理临时文件
+                try: os.remove(self.temp_video)
+                except: pass
+                try: os.remove(self.temp_audio)
+                except: pass
+                
+                self.root.after(0, lambda: messagebox.showinfo("Success", "Video & Audio Saved!"))
+                
+            except Exception as e:
+                 self.root.after(0, lambda: messagebox.showerror("Merge Failed", f"Could not merge:\n{e}\nTemp files kept on desktop."))
+
+        self.root.after(0, self._finish_all)
+
+    def _finish_all(self):
         if self.tray_icon: self.tray_icon.icon = self.icon_img
         self._reset_ui()
-        
-        if os.path.exists(self.current_output_file):
-            try: subprocess.run(f'explorer /select,"{self.current_output_file}"')
+        if os.path.exists(self.final_output):
+            try: subprocess.run(f'explorer /select,"{self.final_output}"')
             except: pass
-            messagebox.showinfo("Success", "Video Saved!\n(Using MSS+OpenCV Engine)")
 
     def _reset_ui(self):
         self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
@@ -299,7 +409,7 @@ class ProfessionalRecorder:
         self.lbl_main_timer.config(text="00:00:00", fg="#555")
         self.lbl_mini_timer.config(text="00:00:00", fg="#bbb")
 
-    # --- UI Setup (不变) ---
+    # --- UI Setup (保持不变) ---
     def setup_ui(self):
         self.bg_color = "#1e1e1e"
         self.title_bg = "#2d2d2d"
