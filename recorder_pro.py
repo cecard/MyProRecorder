@@ -12,7 +12,7 @@ from pystray import MenuItem as item
 import pyaudiowpatch as pyaudio
 from screeninfo import get_monitors
 
-# --- 1. 高清屏适配 ---
+# 1. 高清屏适配
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
@@ -38,7 +38,6 @@ class ProfessionalRecorder:
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
         
-        # 窗口居中
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -48,7 +47,6 @@ class ProfessionalRecorder:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.last_geometry = f"{w}x{h}+{x}+{y}"
         
-        # 状态变量
         self.is_recording = False
         self.is_mini_mode = False
         self.start_time = 0
@@ -59,14 +57,11 @@ class ProfessionalRecorder:
         self.tray_icon = None
         self.record_cursor_var = tk.BooleanVar(value=True)
         
-        # 边框窗口引用
-        self.border_windows = []
+        self.border_windows = [] # 持久化边框
         
-        # 拖拽
         self._drag_data = {"x": 0, "y": 0, "mode": None}
         self.resize_margin = 10 
         
-        # 图标
         self.icon_img = create_internal_icon(64)
         self.rec_icon_img = create_internal_icon(64)
         self.tk_icon = ImageTk.PhotoImage(self.icon_img)
@@ -75,7 +70,6 @@ class ProfessionalRecorder:
         self.setup_ui() 
         self.setup_tray()
         
-        # 绑定事件
         self.root.bind("<Motion>", self.check_cursor)
         self.root.bind("<ButtonPress-1>", self.start_action)
         self.root.bind("<ButtonRelease-1>", self.stop_action)
@@ -84,9 +78,7 @@ class ProfessionalRecorder:
         if not os.path.exists(self.ffmpeg_path):
             messagebox.showerror("Error", f"Kernel missing: {self.ffmpeg_path}")
 
-    # ==========================
-    # 物理引擎 (拖拽/拉伸)
-    # ==========================
+    # --- 拖拽与拉伸 ---
     def check_cursor(self, event):
         if self.is_mini_mode: return
         x, y = event.x, event.y
@@ -114,7 +106,6 @@ class ProfessionalRecorder:
         self._drag_data["win_y"] = self.root.winfo_y()
         self._drag_data["start_w"] = self.root.winfo_width()
         self._drag_data["start_h"] = self.root.winfo_height()
-
         if self.is_mini_mode: 
             self._drag_data["mode"] = "move"
             return
@@ -146,9 +137,7 @@ class ProfessionalRecorder:
             w, h = max(400, w), max(300, h)
             self.root.geometry(f"{w}x{h}+{x}+{y}")
 
-    # ==========================
-    # 模式切换
-    # ==========================
+    # --- 模式切换 ---
     def toggle_mini_mode(self):
         if not self.is_mini_mode:
             self.is_mini_mode = True
@@ -168,9 +157,7 @@ class ProfessionalRecorder:
             except: self.root.geometry("540x480+300+300")
             self.root.attributes('-topmost', False)
 
-    # ==========================
-    # 计时器
-    # ==========================
+    # --- 计时器 ---
     def update_timer(self):
         if self.is_recording:
             elapsed = int(time.time() - self.start_time)
@@ -184,9 +171,7 @@ class ProfessionalRecorder:
             except: pass
             self.root.after(1000, self.update_timer)
 
-    # ==========================
-    # 选区逻辑 (持久化红框)
-    # ==========================
+    # --- 边框持久化 ---
     def clear_borders(self):
         for win in self.border_windows:
             try: win.destroy()
@@ -194,28 +179,26 @@ class ProfessionalRecorder:
         self.border_windows = []
 
     def draw_permanent_border(self, x, y, w, h):
-        self.clear_borders() # 清除旧的
+        self.clear_borders()
         thickness = 3
         color = "red"
-        # 4个长条窗口组成框
         geoms = [
-            (x, y, w, thickness),           # Top
-            (x, y + h - thickness, w, thickness), # Bottom
-            (x, y, thickness, h),           # Left
-            (x + w - thickness, y, thickness, h)  # Right
+            (x, y, w, thickness),           
+            (x, y + h - thickness, w, thickness),
+            (x, y, thickness, h),           
+            (x + w - thickness, y, thickness, h) 
         ]
         for gx, gy, gw, gh in geoms:
             tw = Toplevel(self.root)
             tw.overrideredirect(True)
             tw.attributes('-topmost', True)
-            tw.attributes('-alpha', 0.8) # 略透明
+            tw.attributes('-alpha', 0.8)
             tw.config(bg=color)
             tw.geometry(f"{gw}x{gh}+{gx}+{gy}")
             self.border_windows.append(tw)
 
     def select_area(self):
-        self.clear_borders() # 开始新选区时清除
-        
+        self.clear_borders()
         top = Toplevel(self.root)
         top.attributes('-fullscreen', True)
         top.attributes('-topmost', True)
@@ -236,7 +219,7 @@ class ProfessionalRecorder:
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0] - e.x), abs(self.sel_start[1] - e.y)
             
-            # 偶数强制修正 (FFmpeg 关键要求)
+            # 偶数强制修正 (防止FFmpeg崩溃)
             if w % 2 != 0: w -= 1
             if h % 2 != 0: h -= 1
             if x1 % 2 != 0: x1 -= 1
@@ -256,9 +239,7 @@ class ProfessionalRecorder:
         top.bind("<Button-3>", lambda e: top.destroy()) 
         top.bind("<Escape>", lambda e: top.destroy())
 
-    # ==========================
-    # 音频 & 录制 (多线程防卡顿)
-    # ==========================
+    # --- 录制核心 (改为 MKV) ---
     def get_default_loopback_device(self, p):
         try:
             wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
@@ -273,16 +254,13 @@ class ProfessionalRecorder:
         try:
             while self.is_recording:
                 data = stream.read(1024)
-                if ffmpeg_process.poll() is not None: break # 进程已死，停止写入
+                if ffmpeg_process.poll() is not None: break
                 ffmpeg_process.stdin.write(data)
         except: pass
 
     def start_recording(self):
-        # 1. 立即更新UI，防止卡顿感
         self.btn_start.config(state=tk.DISABLED, bg="#555", text="Init...")
-        self.btn_stop.config(state=tk.DISABLED) # 此时还不能停
-        
-        # 2. 在线程中执行初始化
+        self.btn_stop.config(state=tk.DISABLED)
         threading.Thread(target=self._start_recording_thread).start()
 
     def _start_recording_thread(self):
@@ -292,7 +270,7 @@ class ProfessionalRecorder:
         stream = None
         
         if not loopback_dev:
-            # 必须在主线程弹窗
+            # 主线程弹窗
             self.root.after(0, lambda: self._ask_user_audio(p, None, "No Device"))
             return
         
@@ -302,7 +280,6 @@ class ProfessionalRecorder:
                             input=True, input_device_index=loopback_dev["index"])
             audio_args = ['-f', 's16le', '-ar', str(int(loopback_dev["defaultSampleRate"])), 
                           '-ac', str(loopback_dev["maxInputChannels"]), '-i', 'pipe:0']
-            # 初始化成功，继续
             self.root.after(0, lambda: self._real_start(p, stream, audio_args))
         except Exception as e:
             self.root.after(0, lambda: self._ask_user_audio(p, None, str(e)))
@@ -313,7 +290,6 @@ class ProfessionalRecorder:
             p.terminate()
             self._reset_ui()
             return
-        # 用户同意无声录制
         self._real_start(p, None, [])
 
     def _real_start(self, p, stream, audio_args):
@@ -321,26 +297,24 @@ class ProfessionalRecorder:
         self.start_time = time.time()
         self.update_timer()
         
-        # 更新UI为录制状态
-        self.btn_start.config(text="▶ Recording", bg="#555") # 保持灰色
+        self.btn_start.config(text="▶ Recording", bg="#555")
         self.btn_stop.config(state=tk.NORMAL)
         self.btn_mini_start.config(state=tk.DISABLED)
         self.btn_mini_stop.config(state=tk.NORMAL)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
         
-        filename = f"Capture_{int(time.time())}.mp4"
+        # 关键修改：使用 .mkv 容器，防止崩溃文件损坏
+        filename = f"Capture_{int(time.time())}.mkv"
         
         mouse_flag = '1' if self.record_cursor_var.get() else '0'
         video_args = ['-f', 'gdigrab', '-framerate', '30', '-draw_mouse', mouse_flag]
         
         if self.region:
             x, y, w, h = self.region
-            # 再次确保是偶数 (双重保险)
             x, y, w, h = x//2*2, y//2*2, w//2*2, h//2*2
             video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
         video_args.extend(['-i', 'desktop'])
         
-        # 关键修复：增加 -pix_fmt yuv420p 确保兼容性
         cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + \
               ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p']
         
@@ -361,11 +335,10 @@ class ProfessionalRecorder:
                 self.audio_thread = threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process))
                 self.audio_thread.start()
         except Exception as e:
-            messagebox.showerror("FFmpeg Error", f"Failed to start FFmpeg:\n{e}")
+            messagebox.showerror("FFmpeg Error", f"Failed to start:\n{e}")
             self._reset_ui()
 
     def stop_recording(self):
-        # 也是耗时操作，放入线程
         self.btn_stop.config(text="Saving...", state=tk.DISABLED)
         threading.Thread(target=self._stop_recording_thread).start()
 
@@ -377,7 +350,6 @@ class ProfessionalRecorder:
                 self.process.wait(timeout=5)
             except: 
                 self.process.kill()
-        
         self.root.after(0, self._finish_stop)
 
     def _finish_stop(self):
@@ -395,7 +367,7 @@ class ProfessionalRecorder:
             self.lbl_mini_timer.config(text="00:00:00", fg="#bbb")
         except: pass
 
-    # ... (Setup UI / Tray / Main - remains essentially same) ...
+    # --- UI 构建 ---
     def setup_ui(self):
         self.bg_color = "#1e1e1e"
         self.title_bg = "#2d2d2d"
