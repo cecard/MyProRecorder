@@ -21,51 +21,57 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 安装绘图和打包所需的库
+        # 移除了 pywin32，因为它可能导致某些环境下的兼容性问题
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Generate High-Res Icon (Local)
+    - name: Write Icon from Base64
       shell: python
       run: |
-        from PIL import Image, ImageDraw
-        
-        # 1. 创建一个 256x256 的高清画布 (RGBA透明)
-        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        
-        # 2. 绘制 "录制风格" 的图标
-        # 外圈 (白色背景)
-        draw.ellipse((10, 10, 246, 246), fill=(245, 245, 245), outline=(200, 200, 200), width=2)
-        # 中圈 (深灰色装饰)
-        draw.ellipse((40, 40, 216, 216), outline=(220, 220, 220), width=5)
-        # 内圈 (鲜艳的红色录制点)
-        draw.ellipse((60, 60, 196, 196), fill=(234, 51, 35))
-        # 高光 (增加立体感)
-        draw.ellipse((140, 70, 180, 110), fill=(255, 255, 255, 100))
-        
-        # 3. 生成包含所有标准尺寸的 ICO 文件
-        # 这确保了在 Windows 资源管理器的大图标、小图标、列表视图里都清晰
-        sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
-        img.save('app_icon.ico', format='ICO', sizes=sizes)
-        print("Icon generated successfully!")
+        import base64
+        # 标准 Windows 图标 Base64
+        icon_data = b"""
+        AAABAAEAICAAAAEAIACoEAAAFgAAACgAAAAgAAAAQAAAAAEAIAAAAAAAABAAABMLAAATCwAAAAAA
+        AAAAAAAAAAAA////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDAwBKysrMTc3NzM3NzczNzc3Mzc3
+        NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczKysrMQAAAAALDAwBAAAAAAAAAAAAAAAAAAAA
+        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDAwB
+        AAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAAAAAL
+        DAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
+        AAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
+        AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
+        ////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5
+        +fkA////AAAAAAALDAwBAAAAAP///wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr
+        6wDm5uYA8fHxAP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD5+fkA6+vrAPX19QD///8A
+        ////APX19QDr6+sA+fn5AP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A9fX1AP//
+        /wD19fUA9fX1AP///wD19fUA////AP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A
+        ////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDAwBAAAAAP///wD///8A////AP//
+        /wD///8A////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDAwBAAAAAP///wD///8A
+        ////AP///wD5+fkA6+vrAPX19QD///8A////APX19QDr6+sA+fn5AP///wAAAAALDAwBAAAAAP//
+        /wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr6wDm5uYA8fHxAP///wAAAAALDAwB
+        AAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5+fkA////AAAAAAAL
+        DAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
+        AAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
+        AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
+        ////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD/
+        //8A////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP//
+        /wD///8A////AAAAAAALDAwBKysrMTc3NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczNzc3
+        Mzc3NzM3NzczNzc3MyysrMQAAAAALDAwBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+        """
+        with open("app_icon.ico", "wb") as f:
+            f.write(base64.b64decode(icon_data))
 
     - name: Download FFmpeg (Static Build)
       shell: pwsh
       run: |
-        Write-Host "Downloading FFmpeg..."
         Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip" -UserAgent "NativeHost"
-        Write-Host "Extracting FFmpeg..."
         Expand-Archive ffmpeg.zip -DestinationPath .
-        Write-Host "Moving ffmpeg.exe..."
         $ffmpegPath = Get-ChildItem -Path . -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
         Move-Item $ffmpegPath.FullName .\ffmpeg.exe
 
     - name: Build EXE
       run: |
-        # --clean 清理缓存
-        # --noconsole 隐藏黑框
-        # --icon 指定刚才生成的图标
-        pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
+        pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
