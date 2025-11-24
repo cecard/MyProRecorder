@@ -18,27 +18,43 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install dependencies (Force Install)
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Generate App Icon (On-the-fly)
+    - name: Generate Professional Icon
       run: |
-        # 创建一个临时脚本来生成 .ico 图标文件
-        # 这样你就不用自己上传图标了，且保证和程序里的图标一模一样
         python -c "
         from PIL import Image, ImageDraw
-        size = 256
-        image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        # 画个大眼睛
-        draw.ellipse((10, 10, 246, 246), fill=(240, 240, 240), outline=(200, 200, 200))
-        draw.ellipse((70, 70, 186, 186), fill=(0, 120, 212))
-        draw.ellipse((108, 108, 148, 148), fill=(20, 20, 20))
-        draw.ellipse((153, 76, 178, 101), fill=(255, 255, 255, 230))
-        image.save('app_icon.ico', format='ICO', sizes=[(256, 256)])
-        print('Icon generated successfully!')
+        
+        def create_img(size):
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            # 绘制更加饱满的图标，确保在属性里清晰可见
+            bg_color = (255, 255, 255) # 白色底板，兼容性更好
+            draw.ellipse((0, 0, size, size), fill=bg_color) 
+            
+            # 蓝眼球
+            margin = size * 0.1
+            draw.ellipse((margin, margin, size-margin, size-margin), fill=(0, 120, 212))
+            
+            # 瞳孔
+            p_r = size * 0.25
+            center = size / 2
+            draw.ellipse((center-p_r, center-p_r, center+p_r, center+p_r), fill=(20, 20, 20))
+            
+            # 高光
+            hl_r = size * 0.1
+            draw.ellipse((center+p_r*0.4, center-p_r*0.6, center+p_r*0.4+hl_r*2, center-p_r*0.6+hl_r*2), fill=(255, 255, 255, 240))
+            return img
+
+        # 生成全尺寸层级 ICO
+        sizes = [256, 128, 64, 48, 32, 16]
+        images = [create_img(s) for s in sizes]
+        # 保存为 ico
+        images[0].save('app_icon.ico', format='ICO', sizes=[(s, s) for s in sizes], append_images=images[1:])
+        print('Icon generated!')
         "
 
     - name: Download FFmpeg (Static Build)
@@ -54,8 +70,8 @@ jobs:
 
     - name: Build EXE
       run: |
-        # 关键修改：添加了 --icon="app_icon.ico"
-        pyinstaller --noconfirm --onefile --windowed --name "ProScreenRecorder" --icon="app_icon.ico" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
+        # 增加了 --clean 清除缓存，确保图标更新
+        pyinstaller --clean --noconfirm --onefile --windowed --name "ProScreenRecorder" --icon="app_icon.ico" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
