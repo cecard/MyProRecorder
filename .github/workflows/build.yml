@@ -1,4 +1,4 @@
-name: Build Pro Recorder (Native Libs)
+name: Build Pro Recorder (Audio+Video)
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 安装 mss (截屏) 和 opencv (编码), numpy (数据处理)
+        # 安装 mss(截屏), opencv(视频), pyaudiowpatch(音频)
         pip install mss opencv-python numpy pillow pystray pyaudiowpatch pyinstaller
 
     - name: Generate Icon
@@ -39,13 +39,21 @@ jobs:
         img = create_eye_icon(256)
         img.save("app_icon.ico", format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32)])
 
+    - name: Download FFmpeg (For Merging Only)
+      shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip" -UserAgent "NativeHost"
+        Expand-Archive ffmpeg.zip -DestinationPath .
+        $ffmpegPath = Get-ChildItem -Path . -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+        Move-Item $ffmpegPath.FullName .\ffmpeg.exe
+
     - name: Build EXE
       run: |
-        # 注意：不再需要 add-binary ffmpeg，因为我们改用 opencv 了
-        pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --hidden-import "mss" --hidden-import "cv2" --hidden-import "numpy" recorder_pro.py
+        # 注意：这里加回了 --add-binary "ffmpeg.exe;."
+        pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --add-binary "ffmpeg.exe;." --hidden-import "mss" --hidden-import "cv2" --hidden-import "numpy" --hidden-import "pyaudiowpatch" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ProRecorder-Native
+        name: ProRecorder-Final
         path: dist/ProRecorder.exe
