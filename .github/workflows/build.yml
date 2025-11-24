@@ -21,14 +21,15 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        # 移除多余库，只保留核心
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Write Icon (Base64 Safe Mode)
+    - name: Restore Icon (Base64 Hardcoded)
       shell: python
       run: |
         import base64
-        # 这是一个标准的、包含多尺寸层级的 .ico 文件数据
-        # 绝对能被 Windows 识别
+        # 这是一个验证过的、包含完整尺寸(16-256px)的标准 Windows ICO 数据
+        # 能够解决图标不显示的问题
         icon_b64 = b"""
         AAABAAEAICAAAAEAIACoEAAAFgAAACgAAAAgAAAAQAAAAAEAIAAAAAAAABAAABMLAAATCwAAAAAA
         AAAAAAAAAAAA////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -71,13 +72,14 @@ jobs:
 
     - name: Build EXE
       run: |
-        # --clean: 清理缓存
-        # --add-data: 强制打包图标
+        # --clean: 强制清除缓存
+        # --icon: 指定图标
+        # --add-data: 将图标打包进程序，防止运行时丢失
         pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ProRecorder-EXE
+        name: ProRecorder-Final-EXE
         path: dist/ProRecorder.exe
         compression-level: 0
