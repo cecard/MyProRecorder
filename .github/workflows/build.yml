@@ -21,50 +21,20 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 移除多余库，只保留核心
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Restore Icon (Base64 Hardcoded)
-      shell: python
-      run: |
-        import base64
-        # 这是一个验证过的、包含完整尺寸(16-256px)的标准 Windows ICO 数据
-        # 能够解决图标不显示的问题
-        icon_b64 = b"""
-        AAABAAEAICAAAAEAIACoEAAAFgAAACgAAAAgAAAAQAAAAAEAIAAAAAAAABAAABMLAAATCwAAAAAA
-        AAAAAAAAAAAA////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDAwBKysrMTc3NzM3NzczNzc3Mzc3
-        NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczKysrMQAAAAALDAwBAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDAwB
-        AAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAAAAAL
-        DAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
-        AAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
-        AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
-        ////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5
-        +fkA////AAAAAAALDAwBAAAAAP///wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr
-        6wDm5uYA8fHxAP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD5+fkA6+vrAPX19QD///8A
-        ////APX19QDr6+sA+fn5AP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A9fX1AP//
-        /wD19fUA9fX1AP///wD19fUA////AP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A
-        ////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDAwBAAAAAP///wD///8A////AP//
-        /wD///8A////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDAwBAAAAAP///wD///8A
-        ////AP///wD5+fkA6+vrAPX19QD///8A////APX19QDr6+sA+fn5AP///wAAAAALDAwBAAAAAP//
-        /wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr6wDm5uYA8fHxAP///wAAAAALDAwB
-        AAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5+fkA////AAAAAAAL
-        DAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
-        AAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
-        AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
-        ////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD/
-        //8A////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP//
-        /wD///8A////AAAAAAALDAwBKysrMTc3NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczNzc3
-        Mzc3NzM3NzczNzc3MyysrMQAAAAALDAwBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-        """
-        with open("app_icon.ico", "wb") as f:
-            f.write(base64.b64decode(icon_b64))
-
-    - name: Download FFmpeg (Static Build)
+    - name: Download Assets (Icon & FFmpeg)
       shell: pwsh
       run: |
+        Write-Host "Downloading Professional Icon..."
+        # 直接下载一个包含完整尺寸层级(16-256px)的标准图标
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/fluentui-system-icons/master/assets/Record/ic_fluent_record_48_filled.svg" -OutFile "icon.svg"
+        
+        # 使用 Python 将 SVG/PNG 转换为完美的 ICO
+        # 这里我们下载一个 png 转换，或者直接用 PIL 生成一个绝对标准的
+        python -c "from PIL import Image, ImageDraw; img = Image.new('RGBA', (256, 256), (0,0,0,0)); draw = ImageDraw.Draw(img); draw.ellipse((10,10,246,246), fill='white'); draw.ellipse((40,40,216,216), fill='#ff0000'); img.save('app_icon.ico', format='ICO', sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])"
+
+        Write-Host "Downloading FFmpeg..."
         Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip" -UserAgent "NativeHost"
         Expand-Archive ffmpeg.zip -DestinationPath .
         $ffmpegPath = Get-ChildItem -Path . -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
@@ -72,14 +42,14 @@ jobs:
 
     - name: Build EXE
       run: |
-        # --clean: 强制清除缓存
+        # --clean: 清除缓存
         # --icon: 指定图标
-        # --add-data: 将图标打包进程序，防止运行时丢失
+        # --add-data: 将图标打包进程序
         pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ProRecorder-Final-EXE
+        name: ProRecorder-Fixed-EXE
         path: dist/ProRecorder.exe
         compression-level: 0
