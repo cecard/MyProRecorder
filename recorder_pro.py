@@ -12,16 +12,26 @@ from pystray import MenuItem as item
 import pyaudiowpatch as pyaudio
 from screeninfo import get_monitors
 
-# 1. 高清屏适配
+# DPI awareness for high-DPI displays
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
-    ctypes.windll.user32.SetProcessDPIAware()
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 def resource_path(relative_path):
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
+    """
+    Resolve resource path both in normal execution and when bundled by PyInstaller.
+    When PyInstaller bundles with --add-binary "ffmpeg.exe;." the ffmpeg.exe will be placed
+    inside sys._MEIPASS at runtime. This helper returns the correct path.
+    """
+    try:
+        base_path = sys._MEIPASS  # type: ignore
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 def create_internal_icon(size=64):
     image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -37,7 +47,7 @@ class ProfessionalRecorder:
         self.root.title("Pro Recorder")
         self.root.configure(bg="#1e1e1e")
         self.root.overrideredirect(True)
-        
+
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -46,39 +56,44 @@ class ProfessionalRecorder:
         y = (screen_h - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.last_geometry = f"{w}x{h}+{x}+{y}"
-        
+
         self.is_recording = False
         self.is_mini_mode = False
         self.start_time = 0
         self.process = None
         self.audio_thread = None
-        self.region = None 
+        self.region = None
+        # Use resource_path to be robust inside bundled exe
         self.ffmpeg_path = resource_path("ffmpeg.exe")
         self.tray_icon = None
         self.record_cursor_var = tk.BooleanVar(value=True)
-        
-        self.border_windows = [] # 持久化边框
-        
+
+        self.border_windows = []  # persistent border windows
+
         self._drag_data = {"x": 0, "y": 0, "mode": None}
-        self.resize_margin = 10 
-        
+        self.resize_margin = 10
+
         self.icon_img = create_internal_icon(64)
         self.rec_icon_img = create_internal_icon(64)
         self.tk_icon = ImageTk.PhotoImage(self.icon_img)
-        self.root.iconphoto(True, self.tk_icon)
+        try:
+            self.root.iconphoto(True, self.tk_icon)
+        except Exception:
+            pass
 
-        self.setup_ui() 
+        self.setup_ui()
         self.setup_tray()
-        
+
         self.root.bind("<Motion>", self.check_cursor)
         self.root.bind("<ButtonPress-1>", self.start_action)
         self.root.bind("<ButtonRelease-1>", self.stop_action)
         self.root.bind("<B1-Motion>", self.do_action)
-        
+
         if not os.path.exists(self.ffmpeg_path):
+            # show non-blocking error but keep app runnable for dev/testing
             messagebox.showerror("Error", f"Kernel missing: {self.ffmpeg_path}")
 
-    # --- 拖拽与拉伸 ---
+    # --- Drag/resize helpers ---
     def check_cursor(self, event):
         if self.is_mini_mode: return
         x, y = event.x, event.y
@@ -106,7 +121,7 @@ class ProfessionalRecorder:
         self._drag_data["win_y"] = self.root.winfo_y()
         self._drag_data["start_w"] = self.root.winfo_width()
         self._drag_data["start_h"] = self.root.winfo_height()
-        if self.is_mini_mode: 
+        if self.is_mini_mode:
             self._drag_data["mode"] = "move"
             return
         mode = self._drag_data.get("hover_mode")
@@ -137,13 +152,13 @@ class ProfessionalRecorder:
             w, h = max(400, w), max(300, h)
             self.root.geometry(f"{w}x{h}+{x}+{y}")
 
-    # --- 模式切换 ---
+    # --- Mode toggle ---
     def toggle_mini_mode(self):
         if not self.is_mini_mode:
             self.is_mini_mode = True
             self.last_geometry = self.root.geometry()
             screen_h = self.root.winfo_screenheight()
-            target_y = screen_h - 150 
+            target_y = screen_h - 150
             target_x = 50
             self.normal_frame.pack_forget()
             self.mini_frame.pack(fill=tk.BOTH, expand=True)
@@ -157,7 +172,7 @@ class ProfessionalRecorder:
             except: self.root.geometry("540x480+300+300")
             self.root.attributes('-topmost', False)
 
-    # --- 计时器 ---
+    # --- Timer ---
     def update_timer(self):
         if self.is_recording:
             elapsed = int(time.time() - self.start_time)
@@ -171,7 +186,7 @@ class ProfessionalRecorder:
             except: pass
             self.root.after(1000, self.update_timer)
 
-    # --- 边框持久化 ---
+    # --- Persistent border support ---
     def clear_borders(self):
         for win in self.border_windows:
             try: win.destroy()
@@ -183,16 +198,17 @@ class ProfessionalRecorder:
         thickness = 3
         color = "red"
         geoms = [
-            (x, y, w, thickness),           
+            (x, y, w, thickness),
             (x, y + h - thickness, w, thickness),
-            (x, y, thickness, h),           
-            (x + w - thickness, y, thickness, h) 
+            (x, y, thickness, h),
+            (x + w - thickness, y, thickness, h)
         ]
         for gx, gy, gw, gh in geoms:
             tw = Toplevel(self.root)
             tw.overrideredirect(True)
             tw.attributes('-topmost', True)
-            tw.attributes('-alpha', 0.8)
+            try: tw.attributes('-alpha', 0.8)
+            except: pass
             tw.config(bg=color)
             tw.geometry(f"{gw}x{gh}+{gx}+{gy}")
             self.border_windows.append(tw)
@@ -202,12 +218,13 @@ class ProfessionalRecorder:
         top = Toplevel(self.root)
         top.attributes('-fullscreen', True)
         top.attributes('-topmost', True)
-        top.attributes('-alpha', 0.3)
+        try: top.attributes('-alpha', 0.3)
+        except: pass
         top.config(bg='white', cursor='cross')
         canvas = Canvas(top, bg="white", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
         self.sel_start = [0, 0]
-        
+
         def on_down(e): self.sel_start = [e.x, e.y]
         def on_drag(e):
             canvas.delete("rect")
@@ -218,68 +235,75 @@ class ProfessionalRecorder:
         def on_up(e):
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0] - e.x), abs(self.sel_start[1] - e.y)
-            
-            # 偶数强制修正 (防止FFmpeg崩溃)
+
+            # Force even dimensions to avoid FFmpeg issues
             if w % 2 != 0: w -= 1
             if h % 2 != 0: h -= 1
             if x1 % 2 != 0: x1 -= 1
             if y1 % 2 != 0: y1 -= 1
-            
+
             if w > 50 and h > 50:
                 self.region = (x1, y1, w, h)
                 self.lbl_info.config(text=f"Region: {w}x{h} (Ready)")
                 self.draw_permanent_border(x1, y1, w, h)
-            
+
             top.destroy()
             self.root.deiconify()
 
         canvas.bind("<Button-1>", on_down)
         canvas.bind("<B1-Motion>", on_drag)
         canvas.bind("<ButtonRelease-1>", on_up)
-        top.bind("<Button-3>", lambda e: top.destroy()) 
+        top.bind("<Button-3>", lambda e: top.destroy())
         top.bind("<Escape>", lambda e: top.destroy())
 
-    # --- 录制核心 (改为 MKV) ---
+    # --- Recording core (now using MKV by default) ---
     def get_default_loopback_device(self, p):
         try:
             wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-            if not default_speakers["isLoopbackDevice"]:
+            if not default_speakers.get("isLoopbackDevice", False):
                 for loopback in p.get_loopback_device_info_generator():
-                    if default_speakers["name"] in loopback["name"]: return loopback
-            else: return default_speakers
-        except: return None
+                    if default_speakers["name"] in loopback["name"]:
+                        return loopback
+            else:
+                return default_speakers
+        except Exception:
+            return None
 
     def audio_pipe_worker(self, stream, ffmpeg_process):
         try:
             while self.is_recording:
                 data = stream.read(1024)
                 if ffmpeg_process.poll() is not None: break
-                ffmpeg_process.stdin.write(data)
-        except: pass
+                try:
+                    ffmpeg_process.stdin.write(data)
+                except Exception:
+                    break
+        except Exception:
+            pass
 
     def start_recording(self):
         self.btn_start.config(state=tk.DISABLED, bg="#555", text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
-        threading.Thread(target=self._start_recording_thread).start()
+        threading.Thread(target=self._start_recording_thread, daemon=True).start()
 
     def _start_recording_thread(self):
         p = pyaudio.PyAudio()
         loopback_dev = self.get_default_loopback_device(p)
         audio_args = []
         stream = None
-        
+
         if not loopback_dev:
-            # 主线程弹窗
+            # Prompt main thread for user's choice
             self.root.after(0, lambda: self._ask_user_audio(p, None, "No Device"))
             return
-        
+
         try:
-            stream = p.open(format=pyaudio.paInt16, channels=loopback_dev["maxInputChannels"], 
-                            rate=int(loopback_dev["defaultSampleRate"]), frames_per_buffer=1024, 
-                            input=True, input_device_index=loopback_dev["index"])
-            audio_args = ['-f', 's16le', '-ar', str(int(loopback_dev["defaultSampleRate"])), 
-                          '-ac', str(loopback_dev["maxInputChannels"]), '-i', 'pipe:0']
+            stream = p.open(format=pyaudio.paInt16, channels=int(loopback_dev.get("maxInputChannels",1)),
+                            rate=int(loopback_dev.get("defaultSampleRate",44100)), frames_per_buffer=1024,
+                            input=True, input_device_index=int(loopback_dev["index"]))
+            audio_args = ['-f', 's16le', '-ar', str(int(loopback_dev.get("defaultSampleRate",44100))),
+                          '-ac', str(int(loopback_dev.get("maxInputChannels",1))), '-i', 'pipe:0']
             self.root.after(0, lambda: self._real_start(p, stream, audio_args))
         except Exception as e:
             self.root.after(0, lambda: self._ask_user_audio(p, None, str(e)))
@@ -287,7 +311,8 @@ class ProfessionalRecorder:
     def _ask_user_audio(self, p, stream, error_msg):
         ans = messagebox.askyesno("Audio Error", f"Audio setup failed ({error_msg}).\nRecord video only?")
         if not ans:
-            p.terminate()
+            try: p.terminate()
+            except: pass
             self._reset_ui()
             return
         self._real_start(p, None, [])
@@ -296,60 +321,93 @@ class ProfessionalRecorder:
         self.is_recording = True
         self.start_time = time.time()
         self.update_timer()
-        
+
         self.btn_start.config(text="▶ Recording", bg="#555")
         self.btn_stop.config(state=tk.NORMAL)
         self.btn_mini_start.config(state=tk.DISABLED)
         self.btn_mini_stop.config(state=tk.NORMAL)
         if self.tray_icon: self.tray_icon.icon = self.rec_icon_img
-        
-        # 关键修改：使用 .mkv 容器，防止崩溃文件损坏
+
+        # Use MKV container by default for resilience
         filename = f"Capture_{int(time.time())}.mkv"
-        
+
+        # ddagrab is recommended on modern Windows (Win10/Win11). gdigrab may fail on some systems.
         mouse_flag = '1' if self.record_cursor_var.get() else '0'
-        video_args = ['-f', 'gdigrab', '-framerate', '30', '-draw_mouse', mouse_flag]
-        
+        video_args = ['-f', 'ddagrab', '-framerate', '30']
+
+        if mouse_flag == '0':
+            # ddagrab respects draw_mouse=0
+            video_args.extend(['-draw_mouse', '0'])
+
         if self.region:
             x, y, w, h = self.region
-            x, y, w, h = x//2*2, y//2*2, w//2*2, h//2*2
+            # ensure even values (already ensured in selection, keep double-safety)
+            x, y, w, h = (x//2*2, y//2*2, w//2*2, h//2*2)
             video_args.extend(['-offset_x', str(x), '-offset_y', str(y), '-video_size', f"{w}x{h}"])
+
+        # input
         video_args.extend(['-i', 'desktop'])
-        
+
         cmd = [self.ffmpeg_path, '-y'] + audio_args + video_args + \
               ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p']
-        
-        if audio_args: cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+
+        if audio_args:
+            cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+
         cmd.append(filename)
-        
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        
-        stdin_stream = subprocess.PIPE if audio_args else subprocess.DEVNULL
-        
+
+        startupinfo = None
         try:
-            self.process = subprocess.Popen(cmd, stdin=stdin_stream, stdout=subprocess.PIPE, 
-                                            stderr=subprocess.PIPE, startupinfo=startupinfo, 
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        except Exception:
+            startupinfo = None
+
+        # stdin: pipe only if we have audio to write to ffmpeg, otherwise DEVNULL
+        stdin_stream = subprocess.PIPE if audio_args else subprocess.DEVNULL
+
+        try:
+            self.process = subprocess.Popen(cmd, stdin=stdin_stream, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, startupinfo=startupinfo,
                                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-            
+            # start audio forwarding thread if we opened a stream
             if stream:
-                self.audio_thread = threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process))
+                self.audio_thread = threading.Thread(target=self.audio_pipe_worker, args=(stream, self.process), daemon=True)
                 self.audio_thread.start()
+
+            # Start a thread to read stderr (prevents blocking if ffmpeg emits lots of text)
+            threading.Thread(target=self._drain_ffmpeg_output, args=(self.process,), daemon=True).start()
         except Exception as e:
             messagebox.showerror("FFmpeg Error", f"Failed to start:\n{e}")
             self._reset_ui()
 
+    def _drain_ffmpeg_output(self, proc):
+        try:
+            if proc is None: return
+            # read lines to keep buffer clear
+            while True:
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                # optional: could log here
+        except Exception:
+            pass
+
     def stop_recording(self):
         self.btn_stop.config(text="Saving...", state=tk.DISABLED)
-        threading.Thread(target=self._stop_recording_thread).start()
+        threading.Thread(target=self._stop_recording_thread, daemon=True).start()
 
     def _stop_recording_thread(self):
         self.is_recording = False
         if self.process:
-            try: 
-                if self.process.stdin: self.process.stdin.close()
+            try:
+                if self.process.stdin and not self.process.stdin.closed:
+                    try: self.process.stdin.close()
+                    except: pass
                 self.process.wait(timeout=5)
-            except: 
-                self.process.kill()
+            except Exception:
+                try: self.process.kill()
+                except: pass
         self.root.after(0, self._finish_stop)
 
     def _finish_stop(self):
@@ -358,16 +416,18 @@ class ProfessionalRecorder:
         messagebox.showinfo("Done", "Video Saved!")
 
     def _reset_ui(self):
-        self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
-        self.btn_stop.config(text="⬛ Stop", state=tk.DISABLED)
-        self.btn_mini_start.config(state=tk.NORMAL, bg="#1976d2")
-        self.btn_mini_stop.config(state=tk.DISABLED)
         try:
+            self.btn_start.config(text="▶ Start", state=tk.NORMAL, bg="#1976d2")
+            self.btn_stop.config(text="⬛ Stop", state=tk.DISABLED)
+            self.btn_mini_start.config(state=tk.NORMAL, bg="#1976d2")
+            self.btn_mini_stop.config(state=tk.DISABLED)
             self.lbl_main_timer.config(text="00:00:00", fg="#555")
             self.lbl_mini_timer.config(text="00:00:00", fg="#bbb")
-        except: pass
+            self.lbl_info.config(text="Ready")
+        except Exception:
+            pass
 
-    # --- UI 构建 ---
+    # --- UI setup ---
     def setup_ui(self):
         self.bg_color = "#1e1e1e"
         self.title_bg = "#2d2d2d"
@@ -436,20 +496,29 @@ class ProfessionalRecorder:
         def quit_app(icon, item):
             self.root.after(0, self.kill_app)
         menu = (item('Open', show_window, default=True), item('Exit', quit_app))
-        self.tray_icon = pystray.Icon("name", self.icon_img, "Recorder", menu)
-        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        try:
+            # pystray requires an image object; use the PIL Image we created
+            self.tray_icon = pystray.Icon("name", self.icon_img, "Recorder", menu)
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        except Exception:
+            # non-fatal: continue without tray
+            self.tray_icon = None
 
     def minimize_to_tray(self):
         self.root.withdraw()
 
     def kill_app(self):
         if self.is_recording:
-             if not messagebox.askyesno("Confirm", "Stop recording?", parent=self.root):
-                 return
-             self.stop_recording()
-        if self.tray_icon: self.tray_icon.stop()
-        self.root.destroy()
-        os._exit(0)
+            if not messagebox.askyesno("Confirm", "Stop recording?", parent=self.root):
+                return
+            self.stop_recording()
+        if self.tray_icon:
+            try: self.tray_icon.stop()
+            except: pass
+        try: self.root.destroy()
+        except: pass
+        try: os._exit(0)
+        except: pass
 
 if __name__ == "__main__":
     root = tk.Tk()
