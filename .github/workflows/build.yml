@@ -21,8 +21,25 @@ jobs:
     - name: Install dependencies (Force Install)
       run: |
         python -m pip install --upgrade pip
-        # 增加了 pystray 和 pillow
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
+
+    - name: Generate App Icon (On-the-fly)
+      run: |
+        # 创建一个临时脚本来生成 .ico 图标文件
+        # 这样你就不用自己上传图标了，且保证和程序里的图标一模一样
+        python -c "
+        from PIL import Image, ImageDraw
+        size = 256
+        image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        # 画个大眼睛
+        draw.ellipse((10, 10, 246, 246), fill=(240, 240, 240), outline=(200, 200, 200))
+        draw.ellipse((70, 70, 186, 186), fill=(0, 120, 212))
+        draw.ellipse((108, 108, 148, 148), fill=(20, 20, 20))
+        draw.ellipse((153, 76, 178, 101), fill=(255, 255, 255, 230))
+        image.save('app_icon.ico', format='ICO', sizes=[(256, 256)])
+        print('Icon generated successfully!')
+        "
 
     - name: Download FFmpeg (Static Build)
       shell: pwsh
@@ -37,8 +54,8 @@ jobs:
 
     - name: Build EXE
       run: |
-        # 强制包含所有新引入的库，防止丢失
-        pyinstaller --noconfirm --onefile --windowed --name "ProScreenRecorder" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
+        # 关键修改：添加了 --icon="app_icon.ico"
+        pyinstaller --noconfirm --onefile --windowed --name "ProScreenRecorder" --icon="app_icon.ico" --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
