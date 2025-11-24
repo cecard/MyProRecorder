@@ -1,4 +1,4 @@
-name: Build All-in-One Recorder
+name: Build Pro Recorder (Native Libs)
 
 on:
   push:
@@ -21,53 +21,31 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
+        # 安装 mss (截屏) 和 opencv (编码), numpy (数据处理)
+        pip install mss opencv-python numpy pillow pystray pyaudiowpatch pyinstaller
 
-    - name: Generate High-Quality Icon (Python Script)
+    - name: Generate Icon
       shell: python
       run: |
         from PIL import Image, ImageDraw
-        
-        # 制作一个多尺寸的“眼球”图标
         def create_eye_icon(size):
             img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
-            # 外眼球 (白色)
             draw.ellipse((0, 0, size, size), fill=(240, 240, 240))
-            # 虹膜 (蓝色渐变模拟 - 简化为深蓝)
-            iris_r = size * 0.6
-            center = size / 2
-            draw.ellipse((center - iris_r/2, center - iris_r/2, center + iris_r/2, center + iris_r/2), fill=(30, 144, 255))
-            # 瞳孔 (黑色)
-            pupil_r = size * 0.3
-            draw.ellipse((center - pupil_r/2, center - pupil_r/2, center + pupil_r/2, center + pupil_r/2), fill=(20, 20, 20))
-            # 高光 (白色反光)
-            highlight_r = size * 0.1
-            draw.ellipse((center + pupil_r/3, center - pupil_r/3, center + pupil_r/3 + highlight_r, center - pupil_r/3 + highlight_r), fill=(255, 255, 255, 200))
+            c = size / 2
+            draw.ellipse((c-size*0.3, c-size*0.3, c+size*0.3, c+size*0.3), fill=(30, 144, 255))
+            draw.ellipse((c-size*0.15, c-size*0.15, c+size*0.15, c+size*0.15), fill=(20, 20, 20))
             return img
-
-        # 生成包含 256, 128, 64, 48, 32, 16 尺寸的标准 ICO
-        img_256 = create_eye_icon(256)
-        img_256.save("app_icon.ico", format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
-        print("Icon generated successfully.")
-
-    - name: Download FFmpeg (Static Build)
-      shell: pwsh
-      run: |
-        Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip" -UserAgent "NativeHost"
-        Expand-Archive ffmpeg.zip -DestinationPath .
-        $ffmpegPath = Get-ChildItem -Path . -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
-        Move-Item $ffmpegPath.FullName .\ffmpeg.exe
+        img = create_eye_icon(256)
+        img.save("app_icon.ico", format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32)])
 
     - name: Build EXE
       run: |
-        # 注意：这里使用 --add-binary 确保 ffmpeg 被放入正确的内部目录
-        # 使用 Generated 的 app_icon.ico
-        pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
+        # 注意：不再需要 add-binary ffmpeg，因为我们改用 opencv 了
+        pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --hidden-import "mss" --hidden-import "cv2" --hidden-import "numpy" recorder_pro.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ProRecorder-Final-EXE
+        name: ProRecorder-Native
         path: dist/ProRecorder.exe
-        compression-level: 0
