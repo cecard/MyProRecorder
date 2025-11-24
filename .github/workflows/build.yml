@@ -21,45 +21,21 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # 移除了 pywin32，因为它可能导致某些环境下的兼容性问题
         pip install pyaudiowpatch screeninfo numpy pillow pystray pyinstaller
 
-    - name: Write Icon from Base64
+    - name: Generate High-Res Icon (PIL Method)
       shell: python
       run: |
-        import base64
-        # 标准 Windows 图标 Base64
-        icon_data = b"""
-        AAABAAEAICAAAAEAIACoEAAAFgAAACgAAAAgAAAAQAAAAAEAIAAAAAAAABAAABMLAAATCwAAAAAA
-        AAAAAAAAAAAA////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDAwBKysrMTc3NzM3NzczNzc3Mzc3
-        NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczKysrMQAAAAALDAwBAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALDAwB
-        AAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAAAAAL
-        DAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
-        AAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
-        AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
-        ////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5
-        +fkA////AAAAAAALDAwBAAAAAP///wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr
-        6wDm5uYA8fHxAP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD5+fkA6+vrAPX19QD///8A
-        ////APX19QDr6+sA+fn5AP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A9fX1AP//
-        /wD19fUA9fX1AP///wD19fUA////AP///wAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A
-        ////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDAwBAAAAAP///wD///8A////AP//
-        /wD///8A////AP///wD19fUA9fX1AP///wD///8A////AP///wAAAAALDAwBAAAAAP///wD///8A
-        ////AP///wD5+fkA6+vrAPX19QD///8A////APX19QDr6+sA+fn5AP///wAAAAALDAwBAAAAAP//
-        /wD///8A////AP///wDx8fEA5ubmAOvr6wD19fUA9fX1AOvr6wDm5uYA8fHxAP///wAAAAALDAwB
-        AAAAAP///wD///8A////AP///wD5+fkA8fHxAOfn5wDm5uYA5+fnAPHx8QD5+fkA////AAAAAAAL
-        DAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AAAA
-        AAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////
-        AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A
-        ////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD/
-        //8A////AAAAAAALDAwBAAAAAP///wD///8A////AP///wD///8A////AP///wD///8A////AP//
-        /wD///8A////AAAAAAALDAwBKysrMTc3NzM3NzczNzc3Mzc3NzM3NzczNzc3Mzc3NzM3NzczNzc3
-        Mzc3NzM3NzczNzc3MyysrMQAAAAALDAwBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-        """
-        with open("app_icon.ico", "wb") as f:
-            f.write(base64.b64decode(icon_data))
+        from PIL import Image, ImageDraw
+        # 生成一个包含所有标准尺寸的 ICO，确保 Windows 能识别
+        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # 白底
+        draw.ellipse((10, 10, 246, 246), fill=(255, 255, 255), outline=(200, 200, 200), width=2)
+        # 红点 (录制标志)
+        draw.ellipse((50, 50, 206, 206), fill=(234, 51, 35))
+        # 保存
+        img.save('app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
 
     - name: Download FFmpeg (Static Build)
       shell: pwsh
@@ -71,6 +47,8 @@ jobs:
 
     - name: Build EXE
       run: |
+        # --clean 清除缓存，防止图标不更新
+        # --add-data 强制打包图标
         pyinstaller --clean --noconfirm --onefile --windowed --name "ProRecorder" --icon="app_icon.ico" --add-data "app_icon.ico;." --add-binary "ffmpeg.exe;." --hidden-import "pyaudiowpatch" --hidden-import "pystray" --hidden-import "PIL" recorder_pro.py
 
     - name: Upload Artifact
