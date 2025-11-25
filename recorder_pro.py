@@ -16,17 +16,13 @@ import pystray
 from pystray import MenuItem as item
 
 # --- 系统设置 ---
-myappid = 'mycompany.recorder.final.ui_fix'
+myappid = 'mycompany.recorder.final.screenshot'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception: pass
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception: pass
-
-# 定义鼠标坐标结构体
-class POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 def resource_path(relative_path):
     try:
@@ -45,7 +41,6 @@ class AudioRecorder(threading.Thread):
 
     def run(self):
         self.recording = True
-        wf = None
         try:
             wasapi = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default_speakers = self.p.get_device_info_by_index(wasapi["defaultOutputDevice"])
@@ -80,23 +75,13 @@ class AudioRecorder(threading.Thread):
             while self.recording:
                 time.sleep(0.1)
                 
+            self.stream.stop_stream()
+            self.stream.close()
+            wf.close()
         except Exception as e:
             print(f"Audio Error: {e}")
         finally:
-            # 确保资源释放，防止卡死
-            try:
-                if self.stream:
-                    if self.stream.is_active(): self.stream.stop_stream()
-                    self.stream.close()
-            except: pass
-            
-            try:
-                if wf: wf.close()
-            except: pass
-            
-            try:
-                self.p.terminate()
-            except: pass
+            self.p.terminate()
 
     def stop(self):
         self.recording = False
@@ -111,9 +96,7 @@ class ProfessionalRecorder:
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        
-        # --- [UI修复] 调整窗口大小至 720x540，防止按钮被挤掉 ---
-        w, h = 720, 540
+        w, h = 540, 480
         x = (screen_w - w) // 2
         y = (screen_h - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -123,11 +106,14 @@ class ProfessionalRecorder:
         self.start_time = 0
         self.region = None 
         
+        # 路径与状态
         self.ffmpeg_path = resource_path("ffmpeg.exe")
         self.temp_video = ""
         self.temp_audio = ""
         self.final_output = ""
         self.audio_thread = None
+        
+        # 截屏模式标记
         self.is_screenshot_mode = False
 
         self.record_cursor_var = tk.BooleanVar(value=True)
@@ -136,15 +122,16 @@ class ProfessionalRecorder:
         self._drag_data = {"x": 0, "y": 0, "mode": None}
         self.resize_margin = 10
 
+        # 图标 - 改回红色
         icon_path = resource_path("app_icon.ico")
         if os.path.exists(icon_path):
             self.icon_img = Image.open(icon_path)
             self.root.iconbitmap(icon_path)
         else:
-            self.icon_img = self.create_internal_icon(64, (234, 51, 35))
+            self.icon_img = self.create_internal_icon(64, (234, 51, 35)) # 红色
         self.tk_icon = ImageTk.PhotoImage(self.icon_img)
         self.root.iconphoto(True, self.tk_icon)
-        self.rec_icon_img = self.create_internal_icon(64, (255, 0, 0))
+        self.rec_icon_img = self.create_internal_icon(64, (255, 0, 0)) # 录制中也是红色
 
         self.setup_ui()
         self.setup_tray()
@@ -163,6 +150,7 @@ class ProfessionalRecorder:
         return image
 
     def get_output_folder(self):
+        """ 获取或创建桌面上的专用文件夹 """
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         folder = os.path.join(desktop, "ProRecorder_Files")
         if not os.path.exists(folder):
@@ -170,91 +158,190 @@ class ProfessionalRecorder:
         return folder
 
     def get_timestamp_filename(self, ext):
+        """ 生成带时间戳的文件路径 """
         folder = self.get_output_folder()
         ts = time.strftime("%Y-%m-%d_%H-%M-%S")
         return os.path.join(folder, f"{ts}.{ext}")
 
-    # --- 截屏 ---
+    # --- 截屏功能 ---
     def screenshot_full(self):
+        """ 一键全屏截图 """
         try:
             filename = self.get_timestamp_filename("png")
             with mss.mss() as sct:
                 sct.shot(mon=-1, output=filename)
             self.flash_feedback("Snapshot Saved!")
+            # 自动打开文件
             subprocess.run(f'explorer /select,"{filename}"')
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
     def screenshot_area_mode(self):
+        """ 进入框选截图模式 """
         self.is_screenshot_mode = True
-        self.select_area()
+        self.select_area() # 复用选区逻辑
 
     def perform_area_screenshot(self, region):
+        """ 执行区域截图 """
         try:
             filename = self.get_timestamp_filename("png")
             with mss.mss() as sct:
                 img = sct.grab(region)
                 mss.tools.to_png(img.rgb, img.size, output=filename)
+            
             self.flash_feedback("Area Captured!")
             subprocess.run(f'explorer /select,"{filename}"')
         except Exception as e:
             messagebox.showerror("Error", str(e))
         finally:
-            self.is_screenshot_mode = False
+            self.is_screenshot_mode = False # 重置模式
 
     def flash_feedback(self, text):
+        """ 简单的视觉反馈 """
         try:
             original_text = self.lbl_info.cget("text")
             self.lbl_info.config(text=text, fg="#0f0")
             self.root.after(2000, lambda: self.lbl_info.config(text=original_text, fg="#777"))
         except: pass
 
-    # --- 选区 ---
+    # --- 选区逻辑 (修改版) ---
     def select_area(self):
         self.clear_borders()
+        # 隐藏主窗口以免遮挡
         self.root.withdraw()
+        
         top = Toplevel(self.root)
         top.attributes('-fullscreen', True)
         top.attributes('-topmost', True)
         top.attributes('-alpha', 0.3)
         top.config(bg='white', cursor='cross')
+        
         canvas = Canvas(top, bg="white", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
+        
         self.sel_start = [0, 0]
         
-        def on_down(e): self.sel_start = [e.x, e.y]
+        def on_down(e): 
+            self.sel_start = [e.x, e.y]
+            
         def on_drag(e):
             canvas.delete("rect"); canvas.delete("txt")
+            # 实时画框
             canvas.create_rectangle(self.sel_start[0], self.sel_start[1], e.x, e.y, outline="red", width=2, tags="rect")
+            # 显示尺寸
             w, h = abs(e.x - self.sel_start[0]), abs(e.y - self.sel_start[1])
             canvas.create_text(e.x+30, e.y+20, text=f"{w}x{h}", fill="red", font=("Arial", 12, "bold"), tags="txt")
+
         def on_up(e):
             x1, y1 = min(self.sel_start[0], e.x), min(self.sel_start[1], e.y)
             w, h = abs(self.sel_start[0]-e.x), abs(self.sel_start[1]-e.y)
+            
             top.destroy()
             self.root.deiconify()
-            if w < 10 or h < 10: return
+
+            if w < 10 or h < 10: return # 太小忽略
+
             region = {'top': y1, 'left': x1, 'width': w, 'height': h}
+
+            # 【关键分支】
             if self.is_screenshot_mode:
+                # 如果是截图模式，直接截图，不画红框，不设置录制区域
                 self.perform_area_screenshot(region)
             else:
+                # 录制模式设置
+                # 强制偶数 (视频要求)
                 if w % 2 != 0: w -= 1
                 if h % 2 != 0: h -= 1
-                region['width'] = w; region['height'] = h
+                region['width'] = w
+                region['height'] = h
+                
                 self.region = region
                 self.lbl_info.config(text=f"Region: {w}x{h} (Ready)")
-                if self.border_visible: self.draw_permanent_border(x1, y1, w, h)
+                if self.border_visible:
+                    self.draw_permanent_border(x1, y1, w, h)
 
         canvas.bind("<Button-1>", on_down)
         canvas.bind("<B1-Motion>", on_drag)
         canvas.bind("<ButtonRelease-1>", on_up)
+        # 右键或ESC取消
         def cancel(e):
             top.destroy()
             self.root.deiconify()
             self.is_screenshot_mode = False
-        top.bind("<Button-3>", cancel); top.bind("<Escape>", cancel)
+            
+        top.bind("<Button-3>", cancel)
+        top.bind("<Escape>", cancel)
 
-    # --- 红框 ---
+    # --- 窗口拖拽 (保持不变) ---
+    def check_cursor(self, event):
+        if self.is_mini_mode: return
+        x, y, w, h = event.x, event.y, self.root.winfo_width(), self.root.winfo_height()
+        m = self.resize_margin
+        cursor, mode = "", None
+        if x < m and y < m: cursor, mode = "sb_h_double_arrow", "nw"
+        elif x > w-m and y > h-m: cursor, mode = "sb_h_double_arrow", "se"
+        elif x < m: cursor, mode = "sb_h_double_arrow", "w"
+        elif x > w-m: cursor, mode = "sb_h_double_arrow", "e"
+        elif y < m: cursor, mode = "sb_v_double_arrow", "n"
+        elif y > h-m: cursor, mode = "sb_v_double_arrow", "s"
+        else: cursor, mode = "arrow", None
+        if self.root.cget("cursor") != cursor: self.root.config(cursor=cursor)
+        self._drag_data["hover_mode"] = mode
+
+    def start_action(self, event):
+        self._drag_data["start_x"] = event.x_root
+        self._drag_data["start_y"] = event.y_root
+        self._drag_data["win_x"] = self.root.winfo_x()
+        self._drag_data["win_y"] = self.root.winfo_y()
+        self._drag_data["start_w"] = self.root.winfo_width()
+        self._drag_data["start_h"] = self.root.winfo_height()
+        if self.is_mini_mode or event.y < 40: self._drag_data["mode"] = "move"
+        else: self._drag_data["mode"] = self._drag_data.get("hover_mode")
+
+    def stop_action(self, event):
+        self._drag_data["mode"] = None
+        self.root.config(cursor="arrow")
+
+    def do_action(self, event):
+        mode = self._drag_data.get("mode")
+        if not mode: return
+        dx = event.x_root - self._drag_data["start_x"]
+        dy = event.y_root - self._drag_data["start_y"]
+        if mode == "move":
+            self.root.geometry(f"+{self._drag_data['win_x'] + dx}+{self._drag_data['win_y'] + dy}")
+        else:
+            w = max(400, self._drag_data["start_w"] + (dx if "e" in mode else -dx if "w" in mode else 0))
+            h = max(300, self._drag_data["start_h"] + (dy if "s" in mode else -dy if "n" in mode else 0))
+            self.root.geometry(f"{w}x{h}+{self._drag_data['win_x']}+{self._drag_data['win_y']}")
+
+    def toggle_mini_mode(self):
+        if not self.is_mini_mode:
+            self.is_mini_mode = True
+            self.last_geometry = self.root.geometry()
+            self.normal_frame.pack_forget()
+            self.mini_frame.pack(fill=tk.BOTH, expand=True)
+            self.root.geometry(f"420x50+50+{self.root.winfo_screenheight()-150}")
+            self.root.attributes('-topmost', True)
+        else:
+            self.is_mini_mode = False
+            self.mini_frame.pack_forget()
+            self.normal_frame.pack(fill=tk.BOTH, expand=True)
+            self.root.geometry(self.last_geometry)
+            self.root.attributes('-topmost', False)
+
+    def update_timer(self):
+        if self.is_recording:
+            elapsed = int(time.time() - self.start_time)
+            h, r = divmod(elapsed, 3600)
+            m, s = divmod(r, 60)
+            time_str = f"{h:02}:{m:02}:{s:02}"
+            try:
+                self.lbl_main_timer.config(text=time_str, fg="#d32f2f")
+                self.lbl_mini_timer.config(text=f"REC {time_str}", fg="#d32f2f")
+            except: pass
+            self.root.after(1000, self.update_timer)
+
+    # --- 红框管理 ---
     def clear_borders(self):
         for win in self.border_windows: 
             try: win.destroy()
@@ -268,6 +355,7 @@ class ProfessionalRecorder:
             self.btn_border_mini.config(fg=color)
             self.btn_border_normal.config(fg=color)
         except: pass
+
         if self.border_visible and self.region:
             r = self.region
             self.draw_permanent_border(r['left'], r['top'], r['width'], r['height'])
@@ -277,7 +365,9 @@ class ProfessionalRecorder:
     def draw_permanent_border(self, x, y, w, h):
         self.clear_borders()
         if not self.border_visible: return
-        thickness = 3; color = "red"
+        thickness = 3
+        color = "red"
+        # 框画在外部
         geoms = [
             (x - thickness, y - thickness, w + 2*thickness, thickness),
             (x - thickness, y + h, w + 2*thickness, thickness),
@@ -294,15 +384,19 @@ class ProfessionalRecorder:
             tw.geometry(f"{gw}x{gh}+{gx}+{gy}")
             self.border_windows.append(tw)
 
-    # --- 录制逻辑 ---
+    # --- 录制逻辑 (使用新文件夹) ---
     def start_recording(self):
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
         
-        folder = self.get_output_folder()
+        # 临时文件放在系统临时目录或桌面均可，这里放桌面方便
+        # 最终文件才放专用文件夹
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         ts = int(time.time())
-        self.temp_video = os.path.join(folder, f"temp_v_{ts}.mp4")
-        self.temp_audio = os.path.join(folder, f"temp_a_{ts}.wav")
+        self.temp_video = os.path.join(desktop, f"temp_v_{ts}.mp4")
+        self.temp_audio = os.path.join(desktop, f"temp_a_{ts}.wav")
+        
+        # 最终输出路径
         self.final_output = self.get_timestamp_filename("mp4")
         
         threading.Thread(target=self._recording_controller, daemon=True).start()
@@ -332,14 +426,10 @@ class ProfessionalRecorder:
                 
                 width = monitor['width']
                 height = monitor['height']
-                top_offset = monitor['top']
-                left_offset = monitor['left']
 
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 fps = 20.0
                 out = cv2.VideoWriter(self.temp_video, fourcc, fps, (width, height))
-                
-                pt = POINT()
 
                 while self.is_recording:
                     loop_start = time.time()
@@ -347,19 +437,6 @@ class ProfessionalRecorder:
                     img = sct.grab(monitor)
                     frame = np.array(img)
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-                    
-                    # 绘制鼠标 (带防崩保护)
-                    if self.record_cursor_var.get():
-                        try:
-                            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                            mx = pt.x - left_offset
-                            my = pt.y - top_offset
-                            if 0 <= mx < width and 0 <= my < height:
-                                cv2.circle(frame, (mx, my), 5, (255, 255, 255), -1) 
-                                cv2.circle(frame, (mx, my), 5, (0, 0, 0), 1)
-                        except:
-                            pass # 就算鼠标绘制失败，也不要卡死录制
-
                     out.write(frame)
 
                     elapsed = time.time() - loop_start
@@ -368,13 +445,9 @@ class ProfessionalRecorder:
                         time.sleep(wait_time)
                 
                 out.release()
-                
-                # [关键修复] 音频线程停止增加超时，防止死锁
                 if self.audio_thread:
                     self.audio_thread.stop()
-                    # 最多等待2秒，如果音频卡死直接跳过
-                    self.audio_thread.join(timeout=2.0)
-                
+                    self.audio_thread.join()
                 self.root.after(0, self._start_merge)
 
         except Exception as e:
@@ -391,6 +464,7 @@ class ProfessionalRecorder:
         threading.Thread(target=self._merge_worker, daemon=True).start()
 
     def _merge_worker(self):
+        # 合并
         if not os.path.exists(self.temp_audio) or os.path.getsize(self.temp_audio) < 100:
             if os.path.exists(self.temp_video):
                 os.rename(self.temp_video, self.final_output)
@@ -408,9 +482,10 @@ class ProfessionalRecorder:
                 subprocess.run(cmd, startupinfo=startupinfo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 try: os.remove(self.temp_video); os.remove(self.temp_audio)
                 except: pass
-                self.root.after(0, lambda: messagebox.showinfo("Success", "Video & Audio Saved!"))
+                self.root.after(0, lambda: messagebox.showinfo("Success", "Video Saved!"))
             except Exception as e:
                  self.root.after(0, lambda: messagebox.showerror("Merge Failed", f"{e}"))
+
         self.root.after(0, self._finish_all)
 
     def _finish_all(self):
@@ -442,12 +517,17 @@ class ProfessionalRecorder:
         p = self.mini_frame
         btn_s = {"bd": 0, "width": 4, "font": ("Arial", 10)}
         tk.Button(p, text="⤢", bg="#444", fg="white", command=self.toggle_mini_mode, **btn_s).pack(side=tk.LEFT, fill=tk.Y, padx=1)
+        
+        # 区域截屏按钮
         tk.Button(p, text="📷", bg="#333", fg="cyan", command=self.screenshot_area_mode, **btn_s).pack(side=tk.LEFT, fill=tk.Y, padx=1)
+        
+        # 录制区域设置
         tk.Button(p, text="⛶", bg="#333", fg="white", command=self.select_area, **btn_s).pack(side=tk.LEFT, fill=tk.Y, padx=1)
+        
+        # 红框开关
         self.btn_border_mini = tk.Button(p, text="🔲", bg="#333", fg="#0f0", command=self.toggle_border, **btn_s)
         self.btn_border_mini.pack(side=tk.LEFT, fill=tk.Y, padx=1)
-        self.btn_mini_cur = tk.Button(p, text="🖱️", bg="#333", fg="#0f0", command=self.toggle_cursor_mini, **btn_s)
-        self.btn_mini_cur.pack(side=tk.LEFT, fill=tk.Y, padx=1)
+        
         self.lbl_mini_timer = tk.Label(p, text="00:00:00", bg="#333", fg="#bbb", font=("Consolas", 10))
         self.lbl_mini_timer.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         self.btn_mini_stop = tk.Button(p, text="⬛", bg="#d32f2f", fg="white", command=self.stop_recording, state=tk.DISABLED, **btn_s)
@@ -455,20 +535,17 @@ class ProfessionalRecorder:
         self.btn_mini_start = tk.Button(p, text="▶", bg="#1976d2", fg="white", command=self.start_recording, **btn_s)
         self.btn_mini_start.pack(side=tk.RIGHT, fill=tk.Y, padx=1)
 
-    def toggle_cursor_mini(self):
-        v = self.record_cursor_var.get()
-        self.record_cursor_var.set(not v)
-        self.btn_mini_cur.config(fg="#0f0" if not v else "#555")
-
     def build_normal_ui(self):
         p = self.normal_frame
         t_bar = tk.Frame(p, bg=self.title_bg, height=40)
         t_bar.pack(side=tk.TOP, fill=tk.X)
         t_bar.pack_propagate(False)
         t_bar.bind("<ButtonPress-1>", self.start_action)
+        
         lbl = tk.Label(t_bar, image=self.tk_icon, bg=self.title_bg, bd=0)
         lbl.pack(side=tk.LEFT, padx=10)
         tk.Label(t_bar, text="Pro Recorder", bg=self.title_bg, fg="#eee", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        
         btn_s = {"bd": 0, "width": 4, "font": ("Arial", 11)}
         tk.Button(t_bar, text="✕", bg=self.title_bg, fg="#aaa", activebackground="red", command=self.kill_app, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
         tk.Button(t_bar, text="⤢", bg=self.title_bg, fg="#aaa", command=self.toggle_mini_mode, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
@@ -486,10 +563,12 @@ class ProfessionalRecorder:
         row = tk.Frame(b_frame, bg=self.bg_color)
         row.pack(anchor=tk.CENTER)
         
+        # 截图按钮组
         tk.Button(row, text="📷 Full", command=self.screenshot_full, bg="#333", fg="cyan", bd=0, padx=10, pady=8).pack(side=tk.LEFT, padx=5)
         tk.Button(row, text="📷 Area", command=self.screenshot_area_mode, bg="#333", fg="cyan", bd=0, padx=10, pady=8).pack(side=tk.LEFT, padx=5)
         
-        tk.Frame(row, width=15, bg=self.bg_color).pack(side=tk.LEFT)
+        tk.Frame(row, width=15, bg=self.bg_color).pack(side=tk.LEFT) # 间隔
+        
         tk.Button(row, text="⛶ Rec Area", command=self.select_area, bg="#333", fg="white", bd=0, padx=10, pady=8).pack(side=tk.LEFT, padx=5)
         
         self.btn_start = tk.Button(row, text="▶ Start", command=self.start_recording, bg="#1976d2", fg="white", bd=0, padx=20, pady=8)
@@ -499,8 +578,6 @@ class ProfessionalRecorder:
         
         self.btn_border_normal = tk.Button(row, text="🔲 Border", command=self.toggle_border, bg=self.bg_color, fg="#0f0", bd=0, font=("Segoe UI", 9))
         self.btn_border_normal.pack(side=tk.LEFT, padx=10)
-        
-        tk.Checkbutton(row, text="Cursor", variable=self.record_cursor_var, bg=self.bg_color, fg="#ddd", selectcolor="#333", activebackground=self.bg_color, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=5)
         
         tk.Frame(p, bg="#444", width=1).pack(side=tk.LEFT, fill=tk.Y)
         tk.Frame(p, bg="#444", width=1).pack(side=tk.RIGHT, fill=tk.Y)
