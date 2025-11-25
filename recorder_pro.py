@@ -16,7 +16,7 @@ import pystray
 from pystray import MenuItem as item
 
 # --- 系统设置 ---
-myappid = 'mycompany.recorder.final.cursorfix'
+myappid = 'mycompany.recorder.final.ui_fix'
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception: pass
@@ -24,7 +24,7 @@ try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception: pass
 
-# 定义鼠标坐标结构体 (用于获取全局鼠标位置)
+# 定义鼠标坐标结构体
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
@@ -45,6 +45,7 @@ class AudioRecorder(threading.Thread):
 
     def run(self):
         self.recording = True
+        wf = None
         try:
             wasapi = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
             default_speakers = self.p.get_device_info_by_index(wasapi["defaultOutputDevice"])
@@ -79,13 +80,23 @@ class AudioRecorder(threading.Thread):
             while self.recording:
                 time.sleep(0.1)
                 
-            self.stream.stop_stream()
-            self.stream.close()
-            wf.close()
         except Exception as e:
             print(f"Audio Error: {e}")
         finally:
-            self.p.terminate()
+            # 确保资源释放，防止卡死
+            try:
+                if self.stream:
+                    if self.stream.is_active(): self.stream.stop_stream()
+                    self.stream.close()
+            except: pass
+            
+            try:
+                if wf: wf.close()
+            except: pass
+            
+            try:
+                self.p.terminate()
+            except: pass
 
     def stop(self):
         self.recording = False
@@ -100,7 +111,9 @@ class ProfessionalRecorder:
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        w, h = 540, 480
+        
+        # --- [UI修复] 调整窗口大小至 720x540，防止按钮被挤掉 ---
+        w, h = 720, 540
         x = (screen_w - w) // 2
         y = (screen_h - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -117,7 +130,7 @@ class ProfessionalRecorder:
         self.audio_thread = None
         self.is_screenshot_mode = False
 
-        self.record_cursor_var = tk.BooleanVar(value=True) # 默认开启录制鼠标
+        self.record_cursor_var = tk.BooleanVar(value=True)
         self.border_visible = True
         self.border_windows = []
         self._drag_data = {"x": 0, "y": 0, "mode": None}
@@ -281,15 +294,15 @@ class ProfessionalRecorder:
             tw.geometry(f"{gw}x{gh}+{gx}+{gy}")
             self.border_windows.append(tw)
 
-    # --- 录制逻辑 (含鼠标绘制) ---
+    # --- 录制逻辑 ---
     def start_recording(self):
         self.btn_start.config(state=tk.DISABLED, text="Init...")
         self.btn_stop.config(state=tk.DISABLED)
         
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        folder = self.get_output_folder()
         ts = int(time.time())
-        self.temp_video = os.path.join(desktop, f"temp_v_{ts}.mp4")
-        self.temp_audio = os.path.join(desktop, f"temp_a_{ts}.wav")
+        self.temp_video = os.path.join(folder, f"temp_v_{ts}.mp4")
+        self.temp_audio = os.path.join(folder, f"temp_a_{ts}.wav")
         self.final_output = self.get_timestamp_filename("mp4")
         
         threading.Thread(target=self._recording_controller, daemon=True).start()
@@ -326,30 +339,26 @@ class ProfessionalRecorder:
                 fps = 20.0
                 out = cv2.VideoWriter(self.temp_video, fourcc, fps, (width, height))
                 
-                # 预先定义鼠标点结构
                 pt = POINT()
 
                 while self.is_recording:
                     loop_start = time.time()
                     
-                    # 1. 抓图
                     img = sct.grab(monitor)
                     frame = np.array(img)
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                     
-                    # 2. 绘制鼠标 (如果开启)
+                    # 绘制鼠标 (带防崩保护)
                     if self.record_cursor_var.get():
-                        # 获取全局鼠标位置
-                        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                        # 转换为相对录制区域的坐标
-                        mx = pt.x - left_offset
-                        my = pt.y - top_offset
-                        
-                        # 如果鼠标在画面内，画一个小圆点
-                        if 0 <= mx < width and 0 <= my < height:
-                            # 白色圆心，黑色描边，保证在任何背景下可见
-                            cv2.circle(frame, (mx, my), 5, (255, 255, 255), -1) 
-                            cv2.circle(frame, (mx, my), 5, (0, 0, 0), 1)
+                        try:
+                            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                            mx = pt.x - left_offset
+                            my = pt.y - top_offset
+                            if 0 <= mx < width and 0 <= my < height:
+                                cv2.circle(frame, (mx, my), 5, (255, 255, 255), -1) 
+                                cv2.circle(frame, (mx, my), 5, (0, 0, 0), 1)
+                        except:
+                            pass # 就算鼠标绘制失败，也不要卡死录制
 
                     out.write(frame)
 
@@ -359,9 +368,13 @@ class ProfessionalRecorder:
                         time.sleep(wait_time)
                 
                 out.release()
+                
+                # [关键修复] 音频线程停止增加超时，防止死锁
                 if self.audio_thread:
                     self.audio_thread.stop()
-                    self.audio_thread.join()
+                    # 最多等待2秒，如果音频卡死直接跳过
+                    self.audio_thread.join(timeout=2.0)
+                
                 self.root.after(0, self._start_merge)
 
         except Exception as e:
@@ -425,63 +438,6 @@ class ProfessionalRecorder:
         self.build_normal_ui()
         self.build_mini_ui()
 
-    # 窗口拖拽 (重复代码省略，保持不变)
-    def check_cursor(self, event):
-        if self.is_mini_mode: return
-        x, y, w, h = event.x, event.y, self.root.winfo_width(), self.root.winfo_height()
-        m = self.resize_margin
-        cursor, mode = "", None
-        if x < m and y < m: cursor, mode = "sb_h_double_arrow", "nw"
-        elif x > w-m and y > h-m: cursor, mode = "sb_h_double_arrow", "se"
-        elif x < m: cursor, mode = "sb_h_double_arrow", "w"
-        elif x > w-m: cursor, mode = "sb_h_double_arrow", "e"
-        elif y < m: cursor, mode = "sb_v_double_arrow", "n"
-        elif y > h-m: cursor, mode = "sb_v_double_arrow", "s"
-        else: cursor, mode = "arrow", None
-        if self.root.cget("cursor") != cursor: self.root.config(cursor=cursor)
-        self._drag_data["hover_mode"] = mode
-
-    def start_action(self, event):
-        self._drag_data["start_x"] = event.x_root
-        self._drag_data["start_y"] = event.y_root
-        self._drag_data["win_x"] = self.root.winfo_x()
-        self._drag_data["win_y"] = self.root.winfo_y()
-        self._drag_data["start_w"] = self.root.winfo_width()
-        self._drag_data["start_h"] = self.root.winfo_height()
-        if self.is_mini_mode or event.y < 40: self._drag_data["mode"] = "move"
-        else: self._drag_data["mode"] = self._drag_data.get("hover_mode")
-
-    def stop_action(self, event):
-        self._drag_data["mode"] = None
-        self.root.config(cursor="arrow")
-
-    def do_action(self, event):
-        mode = self._drag_data.get("mode")
-        if not mode: return
-        dx = event.x_root - self._drag_data["start_x"]
-        dy = event.y_root - self._drag_data["start_y"]
-        if mode == "move":
-            self.root.geometry(f"+{self._drag_data['win_x'] + dx}+{self._drag_data['win_y'] + dy}")
-        else:
-            w = max(400, self._drag_data["start_w"] + (dx if "e" in mode else -dx if "w" in mode else 0))
-            h = max(300, self._drag_data["start_h"] + (dy if "s" in mode else -dy if "n" in mode else 0))
-            self.root.geometry(f"{w}x{h}+{self._drag_data['win_x']}+{self._drag_data['win_y']}")
-
-    def toggle_mini_mode(self):
-        if not self.is_mini_mode:
-            self.is_mini_mode = True
-            self.last_geometry = self.root.geometry()
-            self.normal_frame.pack_forget()
-            self.mini_frame.pack(fill=tk.BOTH, expand=True)
-            self.root.geometry(f"420x50+50+{self.root.winfo_screenheight()-150}")
-            self.root.attributes('-topmost', True)
-        else:
-            self.is_mini_mode = False
-            self.mini_frame.pack_forget()
-            self.normal_frame.pack(fill=tk.BOTH, expand=True)
-            self.root.geometry(self.last_geometry)
-            self.root.attributes('-topmost', False)
-
     def build_mini_ui(self):
         p = self.mini_frame
         btn_s = {"bd": 0, "width": 4, "font": ("Arial", 10)}
@@ -517,28 +473,33 @@ class ProfessionalRecorder:
         tk.Button(t_bar, text="✕", bg=self.title_bg, fg="#aaa", activebackground="red", command=self.kill_app, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
         tk.Button(t_bar, text="⤢", bg=self.title_bg, fg="#aaa", command=self.toggle_mini_mode, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
         tk.Button(t_bar, text="─", bg=self.title_bg, fg="#aaa", command=self.minimize_to_tray, **btn_s).pack(side=tk.RIGHT, fill=tk.Y)
+        
         c_frame = tk.Frame(p, bg=self.bg_color)
         c_frame.pack(fill=tk.BOTH, expand=True)
         self.lbl_main_timer = tk.Label(c_frame, text="00:00:00", font=("Segoe UI", 36), bg=self.bg_color, fg="#555")
         self.lbl_main_timer.place(relx=0.5, rely=0.4, anchor=tk.CENTER)
         self.lbl_info = tk.Label(c_frame, text="Ready", font=("Segoe UI", 10), bg=self.bg_color, fg="#777")
         self.lbl_info.place(relx=0.5, rely=0.55, anchor=tk.CENTER)
+        
         b_frame = tk.Frame(c_frame, bg=self.bg_color, height=90)
         b_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=20)
         row = tk.Frame(b_frame, bg=self.bg_color)
         row.pack(anchor=tk.CENTER)
+        
         tk.Button(row, text="📷 Full", command=self.screenshot_full, bg="#333", fg="cyan", bd=0, padx=10, pady=8).pack(side=tk.LEFT, padx=5)
         tk.Button(row, text="📷 Area", command=self.screenshot_area_mode, bg="#333", fg="cyan", bd=0, padx=10, pady=8).pack(side=tk.LEFT, padx=5)
+        
         tk.Frame(row, width=15, bg=self.bg_color).pack(side=tk.LEFT)
         tk.Button(row, text="⛶ Rec Area", command=self.select_area, bg="#333", fg="white", bd=0, padx=10, pady=8).pack(side=tk.LEFT, padx=5)
+        
         self.btn_start = tk.Button(row, text="▶ Start", command=self.start_recording, bg="#1976d2", fg="white", bd=0, padx=20, pady=8)
         self.btn_start.pack(side=tk.LEFT, padx=5)
         self.btn_stop = tk.Button(row, text="⬛ Stop", command=self.stop_recording, bg="#d32f2f", fg="white", bd=0, padx=20, pady=8, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=5)
+        
         self.btn_border_normal = tk.Button(row, text="🔲 Border", command=self.toggle_border, bg=self.bg_color, fg="#0f0", bd=0, font=("Segoe UI", 9))
         self.btn_border_normal.pack(side=tk.LEFT, padx=10)
         
-        # 【关键修复】把 Cursor 复选框加回来了
         tk.Checkbutton(row, text="Cursor", variable=self.record_cursor_var, bg=self.bg_color, fg="#ddd", selectcolor="#333", activebackground=self.bg_color, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=5)
         
         tk.Frame(p, bg="#444", width=1).pack(side=tk.LEFT, fill=tk.Y)
